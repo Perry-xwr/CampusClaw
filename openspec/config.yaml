@@ -1,0 +1,15 @@
+schema: spec-driven
+context: |
+  CampusClaw is a course project. Iteration 1 implements server-side authentication,
+  role authorization, class isolation, and teaching-material knowledge ingestion.
+  The reproducible delivery target is Docker Compose with Nginx, Go, and MySQL 8.
+rules:
+  proposal:
+    - State Why, What Changes, Non-goals, Capabilities, and Impact.
+  design:
+    - Record security boundaries, data model, deployment, risks, and verification decisions.
+  specs:
+    - Use normative MUST requirements and independently testable WHEN/THEN scenarios.
+  tasks:
+    - Keep tasks ordered, small, and paired with an explicit verify method.
+
