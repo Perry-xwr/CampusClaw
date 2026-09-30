@@ -24,14 +24,15 @@ type contextKey string
 const userContextKey contextKey = "user"
 
 type Server struct {
-	config Config
-	store  *Store
-	mux    *http.ServeMux
-	upload sync.Mutex
+	config    Config
+	store     *Store
+	retrieval *RetrievalService
+	mux       *http.ServeMux
+	upload    sync.Mutex
 }
 
-func NewServer(config Config, store *Store) *Server {
-	s := &Server{config: config, store: store, mux: http.NewServeMux()}
+func NewServer(config Config, store *Store, retrieval *RetrievalService) *Server {
+	s := &Server{config: config, store: store, retrieval: retrieval, mux: http.NewServeMux()}
 	s.routes()
 	return s
 }
@@ -47,6 +48,9 @@ func (s *Server) routes() {
 	s.mux.Handle("GET /api/materials/{id}", s.auth(http.HandlerFunc(s.getMaterial)))
 	s.mux.Handle("GET /api/materials/{id}/file", s.auth(http.HandlerFunc(s.getMaterialFile)))
 	s.mux.Handle("POST /api/materials", s.auth(s.teacher(http.HandlerFunc(s.createMaterial))))
+	s.mux.Handle("POST /api/materials/{id}/reindex", s.auth(s.teacher(http.HandlerFunc(s.reindexMaterial))))
+	s.mux.Handle("POST /api/knowledge/search", s.auth(http.HandlerFunc(s.searchKnowledge)))
+	s.mux.Handle("POST /api/ask", s.auth(http.HandlerFunc(s.ask)))
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
@@ -242,7 +246,118 @@ func (s *Server) createMaterial(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not commit upload")
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "title": title})
+	indexStatus := "ready"
+	if err := s.retrieval.IndexMaterial(r.Context(), id, user.ClassID, ChunkOptions{Strategy: "auto"}); err != nil {
+		indexStatus = "failed"
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "title": title, "index_status": indexStatus})
+}
+
+func (s *Server) reindexMaterial(w http.ResponseWriter, r *http.Request) {
+	id, err := materialID(r)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "material not found")
+		return
+	}
+	var request struct {
+		ChunkOptions
+		ClassID any `json:"class_id,omitempty"`
+	}
+	if err := decodeJSON(r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid reindex request")
+		return
+	}
+	if err := s.retrieval.IndexMaterial(r.Context(), id, currentUser(r.Context()).ClassID, request.ChunkOptions); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			writeError(w, http.StatusNotFound, "material not found")
+			return
+		}
+		writeError(w, http.StatusServiceUnavailable, "could not rebuild index")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"material_id": id, "index_status": "ready"})
+}
+
+func (s *Server) searchKnowledge(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		Query   string `json:"query"`
+		Mode    string `json:"mode,omitempty"`
+		ClassID any    `json:"class_id,omitempty"`
+	}
+	if err := decodeJSON(r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid search request")
+		return
+	}
+	request.Query = strings.TrimSpace(request.Query)
+	if request.Query == "" {
+		writeError(w, http.StatusBadRequest, "query is required")
+		return
+	}
+	if request.Mode == "" {
+		request.Mode = "hybrid"
+	}
+	if request.Mode != "keyword" && request.Mode != "vector" && request.Mode != "hybrid" {
+		writeError(w, http.StatusBadRequest, "invalid search mode")
+		return
+	}
+	hits, err := s.retrieval.Search(r.Context(), currentUser(r.Context()).ClassID, request.Query, request.Mode, 10)
+	if err != nil {
+		if errors.Is(err, ErrDependencyUnavailable) {
+			writeError(w, http.StatusServiceUnavailable, "vector retrieval unavailable")
+		} else {
+			writeError(w, http.StatusInternalServerError, "search failed")
+		}
+		return
+	}
+	response := map[string]any{"query": request.Query, "mode": request.Mode, "hits": hits}
+	if len(hits) == 0 {
+		response["message"] = noResultsMessage
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) ask(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+		ClassID any `json:"class_id,omitempty"`
+	}
+	if err := decodeJSON(r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid ask request")
+		return
+	}
+	question := ""
+	for index := len(request.Messages) - 1; index >= 0; index-- {
+		if request.Messages[index].Role == "user" {
+			question = strings.TrimSpace(request.Messages[index].Content)
+			break
+		}
+	}
+	if question == "" {
+		writeError(w, http.StatusBadRequest, "latest user message is required")
+		return
+	}
+	hits, err := s.retrieval.Search(r.Context(), currentUser(r.Context()).ClassID, question, "hybrid", 4)
+	if err != nil {
+		if errors.Is(err, ErrDependencyUnavailable) {
+			writeError(w, http.StatusServiceUnavailable, "vector retrieval unavailable")
+		} else {
+			writeError(w, http.StatusInternalServerError, "ask failed")
+		}
+		return
+	}
+	if len(hits) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"answer": noResultsMessage, "citations": []SearchHit{}})
+		return
+	}
+	answer, err := s.retrieval.models.Chat(r.Context(), "仅根据编号资料简短回答，并使用 [1]、[2] 等编号标注出处。不得使用资料外知识。", buildEvidencePrompt(question, hits))
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "answer generation unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"answer": answer, "citations": hits})
 }
 
 func readValidatedUpload(file multipart.File, header *multipart.FileHeader, limit int64) ([]byte, int, string) {

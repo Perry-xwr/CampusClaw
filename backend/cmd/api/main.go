@@ -27,7 +27,11 @@ func main() {
 	if err := store.Migrate(context.Background()); err != nil {
 		log.Fatal(err)
 	}
-	server := &http.Server{Addr: config.Addr, Handler: app.NewServer(config, store).Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
+	retrieval := app.NewRetrievalService(config, store)
+	if err := retrieval.Initialize(context.Background()); err != nil {
+		log.Fatal(err)
+	}
+	server := &http.Server{Addr: config.Addr, Handler: app.NewServer(config, store, retrieval).Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 60 * time.Second}
 	go func() {
 		log.Printf("CampusClaw API listening on %s", config.Addr)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {

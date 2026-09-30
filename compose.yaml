@@ -15,6 +15,32 @@ services:
       retries: 20
       start_period: 20s
     restart: unless-stopped
+    command: ["--ngram-token-size=2"]
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.6
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  model-mock:
+    build:
+      context: ./model-mock
+    environment:
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-16}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8081/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
 
   api:
     build:
@@ -24,10 +50,26 @@ services:
       UPLOAD_DIR: /data/uploads
       SESSION_TTL_HOURS: ${SESSION_TTL_HOURS:-24}
       MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-1048576}
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-campusclaw_chunks}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-http://model-mock:8081}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-campusclaw-mock-embedding}
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-16}
+      CHAT_BASE_URL: ${CHAT_BASE_URL:-http://model-mock:8081}
+      CHAT_API_KEY: ${CHAT_API_KEY:-}
+      CHAT_MODEL: ${CHAT_MODEL:-campusclaw-mock-chat}
+      MODEL_TIMEOUT_SECONDS: ${MODEL_TIMEOUT_SECONDS:-10}
+      VECTOR_MIN_SCORE: ${VECTOR_MIN_SCORE:-0.35}
+      KEYWORD_MIN_SCORE: ${KEYWORD_MIN_SCORE:-0.01}
     volumes:
       - uploads_data:/data/uploads
     depends_on:
       db:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      model-mock:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8080/health"]
@@ -56,3 +98,4 @@ services:
 volumes:
   db_data:
   uploads_data:
+  qdrant_data:

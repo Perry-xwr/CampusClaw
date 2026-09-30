@@ -102,14 +102,20 @@ func (s *Store) seed(ctx context.Context) error {
 		id, classID, uploaderID  int64
 		title, filename, content string
 	}{
-		{1, 1, 1, "A 班入门材料", "seed-a.txt", "A 班专属示例内容。"},
-		{2, 2, 3, "B 班隔离材料", "seed-b.txt", "B 班专属示例内容。"},
+		{1, 1, 1, "A 班太阳能实验讲义", "seed-a.txt", "A班课程的太阳能电池实验使用钙钛矿材料。学生需要在实验前完成安全培训，并佩戴护目镜。"},
+		{2, 2, 3, "B 班量子通信讲义", "seed-b.txt", "B班独有的量子通信实验使用纠缠光子，并通过量子密钥分发验证通信安全。"},
 	}
 	for _, item := range seedMaterials {
 		if _, err := tx.ExecContext(ctx, `INSERT IGNORE INTO materials (id, class_id, uploader_id, title, original_filename, stored_filename) VALUES (?, ?, ?, ?, ?, ?)`, item.id, item.classID, item.uploaderID, item.title, item.filename, item.filename); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT IGNORE INTO knowledge_entries (material_id, class_id, content) VALUES (?, ?, ?)`, item.id, item.classID, item.content); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE materials SET title=? WHERE id=? AND class_id=?`, item.title, item.id, item.classID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE knowledge_entries SET content=? WHERE material_id=? AND class_id=?`, item.content, item.id, item.classID); err != nil {
 			return err
 		}
 	}
