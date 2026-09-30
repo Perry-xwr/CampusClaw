@@ -23,7 +23,6 @@ services:
       DATABASE_DSN: ${MYSQL_USER}:${MYSQL_PASSWORD}@tcp(db:3306)/${MYSQL_DATABASE}?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
       UPLOAD_DIR: /data/uploads
       SESSION_TTL_HOURS: ${SESSION_TTL_HOURS:-24}
-      COOKIE_SECURE: ${COOKIE_SECURE:-false}
       MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-1048576}
     volumes:
       - uploads_data:/data/uploads

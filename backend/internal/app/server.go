@@ -22,7 +22,6 @@ import (
 type contextKey string
 
 const userContextKey contextKey = "user"
-const sessionCookie = "campusclaw_session"
 
 type Server struct {
 	config Config
@@ -81,16 +80,12 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not create session")
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: token, Path: "/", HttpOnly: true, Secure: s.config.CookieSecure, SameSite: http.SameSiteLaxMode, Expires: expires, MaxAge: int(s.config.SessionTTL.Seconds())})
-	writeJSON(w, http.StatusOK, user)
+	writeJSON(w, http.StatusOK, map[string]any{"token": token, "user": user})
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
-	cookie, _ := r.Cookie(sessionCookie)
-	if cookie != nil {
-		_ = s.store.DeleteSession(r.Context(), cookie.Value)
-	}
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Path: "/", HttpOnly: true, Secure: s.config.CookieSecure, SameSite: http.SameSiteLaxMode, MaxAge: -1, Expires: time.Unix(1, 0)})
+	token, _ := bearerToken(r.Header.Get("Authorization"))
+	_ = s.store.DeleteSession(r.Context(), token)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -273,18 +268,26 @@ func readValidatedUpload(file multipart.File, header *multipart.FileHeader, limi
 
 func (s *Server) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cookie, err := r.Cookie(sessionCookie)
-		if err != nil || cookie.Value == "" {
+		token, ok := bearerToken(r.Header.Get("Authorization"))
+		if !ok {
 			writeError(w, http.StatusUnauthorized, "authentication required")
 			return
 		}
-		user, err := s.store.UserBySession(r.Context(), cookie.Value)
+		user, err := s.store.UserBySession(r.Context(), token)
 		if err != nil {
 			writeError(w, http.StatusUnauthorized, "authentication required")
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userContextKey, user)))
 	})
+}
+
+func bearerToken(header string) (string, bool) {
+	parts := strings.Split(header, " ")
+	if len(parts) != 2 || parts[0] != "Bearer" || parts[1] == "" || strings.TrimSpace(parts[1]) != parts[1] {
+		return "", false
+	}
+	return parts[1], true
 }
 
 func (s *Server) teacher(next http.Handler) http.Handler {

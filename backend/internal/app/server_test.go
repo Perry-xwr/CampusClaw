@@ -55,3 +55,27 @@ func TestEncodeFilename(t *testing.T) {
 		t.Fatalf("encoded filename=%q", got)
 	}
 }
+
+func TestBearerToken(t *testing.T) {
+	tests := []struct {
+		header string
+		token  string
+		ok     bool
+	}{
+		{"Bearer session-token", "session-token", true},
+		{"", "", false},
+		{"Basic session-token", "", false},
+		{"Bearer", "", false},
+		{"Bearer ", "", false},
+		{"Bearer  session-token", "", false},
+		{"bearer session-token", "", false},
+	}
+	for _, test := range tests {
+		t.Run(test.header, func(t *testing.T) {
+			token, ok := bearerToken(test.header)
+			if token != test.token || ok != test.ok {
+				t.Fatalf("bearerToken(%q)=(%q,%v), want (%q,%v)", test.header, token, ok, test.token, test.ok)
+			}
+		})
+	}
+}

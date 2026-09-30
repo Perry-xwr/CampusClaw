@@ -12,7 +12,6 @@ type Config struct {
 	DatabaseDSN    string
 	UploadDir      string
 	SessionTTL     time.Duration
-	CookieSecure   bool
 	MaxUploadBytes int64
 }
 
@@ -25,16 +24,11 @@ func ConfigFromEnv() (Config, error) {
 	if err != nil || maxBytes < 1 {
 		return Config{}, fmt.Errorf("MAX_UPLOAD_BYTES must be a positive integer")
 	}
-	cookieSecure, err := strconv.ParseBool(env("COOKIE_SECURE", "false"))
-	if err != nil {
-		return Config{}, fmt.Errorf("COOKIE_SECURE must be true or false")
-	}
 	return Config{
 		Addr:           env("API_ADDR", ":8080"),
 		DatabaseDSN:    env("DATABASE_DSN", "campusclaw:campusclaw@tcp(db:3306)/campusclaw?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci"),
 		UploadDir:      env("UPLOAD_DIR", "/data/uploads"),
 		SessionTTL:     time.Duration(ttlHours) * time.Hour,
-		CookieSecure:   cookieSecure,
 		MaxUploadBytes: maxBytes,
 	}, nil
 }

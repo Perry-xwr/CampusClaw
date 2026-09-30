@@ -4,7 +4,7 @@ CampusClaw 是课程用教研智能体平台。本迭代只交付后续智能能
 
 ## 功能
 
-- bcrypt 密码登录、数据库服务端 session、登出和当前用户信息
+- bcrypt 密码登录、Bearer 随机 token、数据库服务端 session、登出和当前用户信息
 - teacher 可上传非空 UTF-8 `.txt` / `.md`；student 只读且上传 API 返回 403
 - 列表、详情和文件下载全部按 session 中的班级过滤
 - 文件、`materials` 和 `knowledge_entries` 同步入库，失败时回滚并清理文件
@@ -58,7 +58,26 @@ Invoke-RestMethod http://localhost:8080/health
 
 浏览器访问 <http://localhost:8080>。若修改 `.env` 的 `WEB_PORT`，请使用相应端口。
 
-首次使用前应修改 `.env` 中两个数据库密码。`.env` 已被 Git 忽略。`COOKIE_SECURE=false` 仅用于本机 HTTP 演示；TLS 环境应设为 `true`。
+首次使用前应修改 `.env` 中两个数据库密码。`.env` 已被 Git 忽略。
+
+## API 鉴权
+
+`POST /api/login` 成功后返回随机 session token 和用户信息：
+
+```json
+{
+  "token": "<raw-session-token>",
+  "user": {
+    "id": 1,
+    "username": "teacher_a",
+    "role": "teacher",
+    "class_id": 1,
+    "class_name": "A 班"
+  }
+}
+```
+
+除登录和健康检查外，API 请求必须携带 `Authorization: Bearer <token>`。数据库只保存 token 的 SHA-256 哈希；后端使用 token 查询服务端 session，并以 session 关联的用户、角色和班级作为权限依据，客户端提交的 `role` 或 `class_id` 不会改变身份。前端为课程演示将 token 保存在 `localStorage`；这不是对生产环境最佳安全方案的声明。
 
 ## 测试账号
 

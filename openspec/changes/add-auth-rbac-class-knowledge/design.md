@@ -21,11 +21,11 @@ Compose defines `web` (Nginx serving the built React app and proxying `/api` and
 
 Host Go and Node installations are unnecessary because multi-stage Dockerfiles perform both builds.
 
-### Decision 2: Server-side opaque sessions
+### Decision 2: Server-side opaque sessions transported as Bearer tokens
 
-On successful login, the API creates a cryptographically random opaque token and stores only its SHA-256 hash in `sessions`. The browser receives the raw token in an `HttpOnly`, `SameSite=Lax` cookie. The session row is the server-side authority for `user_id`; each request joins the user row to obtain `role` and `class_id`. Client-submitted `role`, `user_id`, and `class_id` are ignored.
+On successful login, the API creates a cryptographically random opaque token, stores only its SHA-256 hash in `sessions`, and returns the raw token once in the JSON login response. The frontend stores the token in `localStorage` for this course demo and sends it as `Authorization: Bearer <token>` on protected requests. The session row is the server-side authority for `user_id`; each request joins the user row to obtain `role` and `class_id`. Client-submitted `role`, `user_id`, and `class_id` are ignored. This localStorage choice is a demonstration trade-off, not a production security recommendation.
 
-Authentication middleware returns 401 for missing, invalid, or expired sessions. Role middleware returns 403 when a valid student invokes a teacher-only operation.
+Authentication middleware returns 401 for a missing/malformed Authorization header or an invalid/expired token. Role middleware returns 403 when a valid student invokes a teacher-only operation.
 
 ### Decision 3: Passwords use bcrypt
 
@@ -61,14 +61,14 @@ React + TypeScript + Vite provides login, current-user header, material list, fi
 
 ## Security boundaries
 
-Authentication establishes identity; authorization permits actions; class isolation filters objects. These controls are independently enforced for every API request. Cookies are `Secure` only when configured for HTTPS, the session TTL is finite, upload names are randomized, SQL uses bound parameters, and error messages omit cross-class metadata and filesystem paths.
+Authentication establishes identity; authorization permits actions; class isolation filters objects. These controls are independently enforced for every API request. The session TTL is finite, raw tokens are never stored in the database or logged, upload names are randomized, SQL uses bound parameters, and error messages omit cross-class metadata and filesystem paths.
 
 ## Risks / Trade-offs
 
 - **DB/file atomicity has no distributed transaction:** staged writes plus rollback cleanup minimize orphaning; the single API replica and upload lock make the chosen ordering deterministic for this iteration.
 - **Database-backed sessions add a lookup:** acceptable for a course demo and make revocation/logout explicit.
 - **Plain-text formats only:** intentionally avoids complex parsers and keeps knowledge ingestion inspectable.
-- **HTTP local demo cookies are not Secure by default:** production deployment is out of scope; `COOKIE_SECURE=true` is documented for TLS.
+- **Browser storage of bearer tokens has XSS exposure:** `localStorage` keeps the course demo and refresh flow simple, but production deployment should use a threat-model-appropriate token storage and rotation design.
 
 ## Migration Plan
 
@@ -77,4 +77,3 @@ Greenfield initialization uses versioned SQL in `backend/migrations/`. The API a
 ## Design review judgment
 
 The design is fit for Apply because every trust boundary is server-side, cross-class existence is concealed with uniform 404 responses, upload failure invariants cover database and filesystem state, and the Compose topology matches the course architecture. The principal residual limitation is that real Compose execution requires Docker Desktop on the host; this does not change the implementation design.
-

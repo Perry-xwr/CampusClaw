@@ -12,8 +12,8 @@
 
 ## 3. Authentication and authorization
 
-- [x] 3.1 Implement login with bcrypt and opaque DB sessions. Verify: correct login set an HttpOnly cookie; wrong password returned 401 and session count stayed unchanged.
-- [x] 3.2 Implement authentication middleware and `GET /api/me`. Verify: no cookie returned 401; teacher cookie returned `teacher_a`, teacher role, class 1.
+- [x] 3.1 Implement login with bcrypt and opaque DB sessions. Verify: correct login returned a raw token plus nested user while storing only its hash; wrong password returned 401 and session count stayed unchanged.
+- [x] 3.2 Implement Bearer authentication middleware and `GET /api/me`. Verify: missing/malformed/invalid Authorization returned 401; a valid teacher token returned `teacher_a`, teacher role, class 1.
 - [x] 3.3 Implement logout and session revocation. Verify: after logout the former session received 401 from `/api/me`.
 - [x] 3.4 Implement teacher-only authorization middleware. Verify: student upload with forged `role=teacher` returned 403 and all three counts stayed unchanged.
 

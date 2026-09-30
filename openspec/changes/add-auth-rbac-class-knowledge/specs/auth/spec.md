@@ -6,14 +6,14 @@ Authenticate seeded CampusClaw users with server-side sessions and protect busin
 
 ### Requirement: Password login establishes a server-side session
 
-The system MUST validate credentials against a bcrypt hash and MUST create an opaque server-side session containing authoritative user identity through its user relationship.
+The system MUST validate credentials against a bcrypt hash and MUST create an opaque server-side session containing authoritative user identity through its user relationship. It MUST return the raw token only in the successful login response and MUST store only its hash in the database.
 
 #### Scenario: Correct teacher credentials
 
 - **GIVEN** the seeded teacher A account
 - **WHEN** the correct username and password are submitted to `POST /api/login`
-- **THEN** the response MUST succeed and set an HttpOnly session cookie
-- **AND** `GET /api/me` with that cookie MUST identify the teacher, role, and class
+- **THEN** the response MUST succeed with a token and nested user object
+- **AND** `GET /api/me` with `Authorization: Bearer <token>` MUST identify the teacher, role, and class
 
 #### Scenario: Wrong password
 
@@ -24,7 +24,7 @@ The system MUST validate credentials against a bcrypt hash and MUST create an op
 
 ### Requirement: Protected APIs reject unauthenticated requests
 
-All business APIs except login and health MUST require a valid, unexpired session.
+All business APIs except login and health MUST require `Authorization: Bearer <token>` for a valid, unexpired server-side session.
 
 #### Scenario: Missing session
 
@@ -35,12 +35,11 @@ All business APIs except login and health MUST require a valid, unexpired sessio
 
 ### Requirement: Logout revokes the current session
 
-Logout MUST delete the server-side session and expire its cookie.
+Logout MUST read the Bearer token and delete its server-side session.
 
 #### Scenario: Access after logout
 
-- **GIVEN** a logged-in user
+- **GIVEN** a logged-in user with a valid Bearer token
 - **WHEN** the user calls `POST /api/logout` and then calls `GET /api/me`
 - **THEN** logout MUST succeed
 - **AND** the later request MUST return HTTP 401
-
