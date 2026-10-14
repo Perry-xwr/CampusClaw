@@ -51,6 +51,16 @@ func (s *Server) routes() {
 	s.mux.Handle("POST /api/materials/{id}/reindex", s.auth(s.teacher(http.HandlerFunc(s.reindexMaterial))))
 	s.mux.Handle("POST /api/knowledge/search", s.auth(http.HandlerFunc(s.searchKnowledge)))
 	s.mux.Handle("POST /api/ask", s.auth(http.HandlerFunc(s.ask)))
+	s.mux.Handle("GET /api/prompts", s.auth(http.HandlerFunc(s.listPrompts)))
+	s.mux.Handle("POST /api/prompts", s.auth(s.teacher(http.HandlerFunc(s.createPrompt))))
+	s.mux.Handle("PUT /api/prompts/{id}", s.auth(s.teacher(http.HandlerFunc(s.updatePrompt))))
+	s.mux.Handle("GET /api/skills", s.auth(http.HandlerFunc(s.listSkills)))
+	s.mux.Handle("POST /api/skills", s.auth(s.teacher(http.HandlerFunc(s.createSkill))))
+	s.mux.Handle("PUT /api/skills/{id}", s.auth(s.teacher(http.HandlerFunc(s.updateSkill))))
+	s.mux.Handle("GET /api/sessions", s.auth(http.HandlerFunc(s.listChatSessions)))
+	s.mux.Handle("POST /api/sessions", s.auth(http.HandlerFunc(s.createChatSession)))
+	s.mux.Handle("GET /api/sessions/{id}/messages", s.auth(http.HandlerFunc(s.listChatMessages)))
+	s.mux.Handle("POST /api/sessions/{id}/messages", s.auth(http.HandlerFunc(s.createChatMessage)))
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {

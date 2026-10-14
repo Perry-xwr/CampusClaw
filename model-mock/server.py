@@ -2,6 +2,7 @@ import hashlib
 import json
 import math
 import os
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 DIMENSION = int(os.getenv("EMBEDDING_DIMENSION", "16"))
@@ -89,6 +90,23 @@ class Handler(BaseHTTPRequestHandler):
                     markers.append(marker)
             suffix = " ".join(markers[:2] or ["[1]"])
             content = f"根据本班资料，实验前需要先完成安全培训。{suffix}"
+            if request.get("stream") is True:
+                system_prompt = "\n".join(str(item.get("content", "")) for item in messages if item.get("role") == "system")
+                if "禁止直接给出最终答案" in system_prompt:
+                    content = f"我们先从资料线索开始：你能指出实验开始前必须完成的准备事项吗？{suffix}"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "keep-alive")
+                self.end_headers()
+                for token in (content[index:index + 2] for index in range(0, len(content), 2)):
+                    event = {"choices": [{"index": 0, "delta": {"content": token}, "finish_reason": None}]}
+                    self.wfile.write(("data: " + json.dumps(event, ensure_ascii=False) + "\n\n").encode("utf-8"))
+                    self.wfile.flush()
+                    time.sleep(0.01)
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+                return
             self.send_json(200, {"id": "mock-chat", "object": "chat.completion", "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}]})
             return
         self.send_json(404, {"error": "not found"})

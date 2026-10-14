@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"bufio"
 	"strings"
 	"time"
 )
@@ -87,6 +88,46 @@ func (client *ModelClient) Chat(ctx context.Context, system, prompt string) (str
 		return "", fmt.Errorf("chat request failed: %w", ErrDependencyUnavailable)
 	}
 	return response.Choices[0].Message.Content, nil
+}
+
+func (client *ModelClient) ChatStream(ctx context.Context, system string, history []ChatMessage, onToken func(string) error) (string, error) {
+	messages := []map[string]string{{"role": "system", "content": system}}
+	for _, message := range history {
+		if message.Role == "user" || message.Role == "assistant" {
+			messages = append(messages, map[string]string{"role": message.Role, "content": message.Content})
+		}
+	}
+	body, err := json.Marshal(map[string]any{"model": client.chatModel, "stream": true, "messages": messages})
+	if err != nil { return "", err }
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, client.chatURL, bytes.NewReader(body))
+	if err != nil { return "", err }
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "text/event-stream")
+	if client.chatKey != "" { request.Header.Set("Authorization", "Bearer "+client.chatKey) }
+	response, err := client.http.Do(request)
+	if err != nil { return "", fmt.Errorf("chat stream failed: %w", ErrDependencyUnavailable) }
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 { _, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096)); return "", fmt.Errorf("chat stream HTTP %d: %w", response.StatusCode, ErrDependencyUnavailable) }
+	reader := bufio.NewReader(io.LimitReader(response.Body, 4<<20))
+	var answer strings.Builder
+	for {
+		line, readErr := reader.ReadString('\n')
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "data:") {
+			data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			if data == "[DONE]" { break }
+			var event struct { Choices []struct { Delta struct { Content string `json:"content"` } `json:"delta"` } `json:"choices"` }
+			if err := json.Unmarshal([]byte(data), &event); err != nil { return answer.String(), fmt.Errorf("invalid chat stream: %w", ErrDependencyUnavailable) }
+			if len(event.Choices) > 0 && event.Choices[0].Delta.Content != "" {
+				token := event.Choices[0].Delta.Content
+				if err := onToken(token); err != nil { return answer.String(), err }
+				answer.WriteString(token)
+			}
+		}
+		if readErr != nil { if readErr != io.EOF { return answer.String(), fmt.Errorf("read chat stream: %w", ErrDependencyUnavailable) }; break }
+	}
+	if strings.TrimSpace(answer.String()) == "" { return "", fmt.Errorf("empty chat stream: %w", ErrDependencyUnavailable) }
+	return answer.String(), nil
 }
 
 func (client *ModelClient) post(ctx context.Context, url, key string, requestBody, responseBody any) error {

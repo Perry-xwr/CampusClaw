@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -119,6 +120,16 @@ func (s *Store) seed(ctx context.Context) error {
 			return err
 		}
 	}
+	defaultPrompt := "你是 CampusClaw 班级课程助教。回答必须依据当前会话的本班检索资料，明确区分资料事实与推理；无法从资料确认时应说明。"
+	defaultSkill := "通过提问引导学生识别题目条件、关联概念并分步骤思考。每次只提出一个简短提示或问题；不要直接给出最终答案、代算最终结果或替学生完成题目。"
+	for _, classID := range []int64{1, 2} {
+		if _, err := tx.ExecContext(ctx, `INSERT IGNORE INTO teacher_prompts (class_id, created_by, name, content) VALUES (?, NULL, '课程知识助教', ?)`, classID, defaultPrompt); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT IGNORE INTO teacher_skills (class_id, created_by, slug, name, instructions) VALUES (?, NULL, 'guided-solution', '解题引导', ?)`, classID, defaultSkill); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
 }
 
@@ -184,4 +195,96 @@ func (s *Store) Material(ctx context.Context, id, classID int64) (Material, stri
 		return Material{}, "", ErrNotFound
 	}
 	return item, stored, err
+}
+
+func (s *Store) ListPrompts(ctx context.Context, classID int64) ([]Prompt, error) {
+	rows, err := s.DB.QueryContext(ctx, `SELECT id, name, content, is_active, updated_at FROM teacher_prompts WHERE class_id=? ORDER BY is_active DESC, id`, classID)
+	if err != nil { return nil, err }
+	defer rows.Close()
+	items := []Prompt{}
+	for rows.Next() { var item Prompt; if err := rows.Scan(&item.ID, &item.Name, &item.Content, &item.IsActive, &item.UpdatedAt); err != nil { return nil, err }; items = append(items, item) }
+	return items, rows.Err()
+}
+
+func (s *Store) SavePrompt(ctx context.Context, classID, userID, id int64, name, content string, active bool) (Prompt, error) {
+	if id == 0 {
+		result, err := s.DB.ExecContext(ctx, `INSERT INTO teacher_prompts (class_id, created_by, name, content, is_active) VALUES (?, ?, ?, ?, ?)`, classID, userID, name, content, active)
+		if err != nil { return Prompt{}, err }
+		id, err = result.LastInsertId(); if err != nil { return Prompt{}, err }
+	} else {
+		result, err := s.DB.ExecContext(ctx, `UPDATE teacher_prompts SET name=?, content=?, is_active=? WHERE id=? AND class_id=?`, name, content, active, id, classID)
+		if err != nil { return Prompt{}, err }
+		changed, err := result.RowsAffected(); if err != nil { return Prompt{}, err }; if changed == 0 { var exists int; if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM teacher_prompts WHERE id=? AND class_id=?`, id, classID).Scan(&exists); err != nil { return Prompt{}, err }; if exists == 0 { return Prompt{}, ErrNotFound } }
+	}
+	var item Prompt
+	err := s.DB.QueryRowContext(ctx, `SELECT id, name, content, is_active, updated_at FROM teacher_prompts WHERE id=? AND class_id=?`, id, classID).Scan(&item.ID, &item.Name, &item.Content, &item.IsActive, &item.UpdatedAt)
+	return item, err
+}
+
+func (s *Store) ListSkills(ctx context.Context, classID int64, activeOnly bool) ([]Skill, error) {
+	query := `SELECT id, slug, name, instructions, is_active, updated_at FROM teacher_skills WHERE class_id=?`
+	if activeOnly { query += ` AND is_active=TRUE` }
+	query += ` ORDER BY is_active DESC, id`
+	rows, err := s.DB.QueryContext(ctx, query, classID); if err != nil { return nil, err }; defer rows.Close()
+	items := []Skill{}
+	for rows.Next() { var item Skill; if err := rows.Scan(&item.ID, &item.Slug, &item.Name, &item.Instructions, &item.IsActive, &item.UpdatedAt); err != nil { return nil, err }; items = append(items, item) }
+	return items, rows.Err()
+}
+
+func (s *Store) SaveSkill(ctx context.Context, classID, userID, id int64, slug, name, instructions string, active bool) (Skill, error) {
+	if id == 0 {
+		result, err := s.DB.ExecContext(ctx, `INSERT INTO teacher_skills (class_id, created_by, slug, name, instructions, is_active) VALUES (?, ?, ?, ?, ?, ?)`, classID, userID, slug, name, instructions, active)
+		if err != nil { return Skill{}, err }; id, err = result.LastInsertId(); if err != nil { return Skill{}, err }
+	} else {
+		result, err := s.DB.ExecContext(ctx, `UPDATE teacher_skills SET slug=?, name=?, instructions=?, is_active=? WHERE id=? AND class_id=?`, slug, name, instructions, active, id, classID)
+		if err != nil { return Skill{}, err }; changed, err := result.RowsAffected(); if err != nil { return Skill{}, err }; if changed == 0 { var exists int; if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM teacher_skills WHERE id=? AND class_id=?`, id, classID).Scan(&exists); err != nil { return Skill{}, err }; if exists == 0 { return Skill{}, ErrNotFound } }
+	}
+	var item Skill
+	err := s.DB.QueryRowContext(ctx, `SELECT id, slug, name, instructions, is_active, updated_at FROM teacher_skills WHERE id=? AND class_id=?`, id, classID).Scan(&item.ID, &item.Slug, &item.Name, &item.Instructions, &item.IsActive, &item.UpdatedAt)
+	return item, err
+}
+
+func (s *Store) CreateChatSession(ctx context.Context, classID, userID int64, promptID, skillID *int64, title string) (ChatSession, error) {
+	result, err := s.DB.ExecContext(ctx, `INSERT INTO chat_sessions (class_id, user_id, prompt_id, skill_id, title) VALUES (?, ?, ?, ?, ?)`, classID, userID, promptID, skillID, title)
+	if err != nil { return ChatSession{}, err }; id, err := result.LastInsertId(); if err != nil { return ChatSession{}, err }
+	return s.ChatSession(ctx, id, userID, classID)
+}
+
+func (s *Store) ChatSession(ctx context.Context, id, userID, classID int64) (ChatSession, error) {
+	var item ChatSession
+	err := s.DB.QueryRowContext(ctx, `SELECT id, title, prompt_id, skill_id, created_at, updated_at FROM chat_sessions WHERE id=? AND user_id=? AND class_id=?`, id, userID, classID).Scan(&item.ID, &item.Title, &item.PromptID, &item.SkillID, &item.CreatedAt, &item.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) { return ChatSession{}, ErrNotFound }; return item, err
+}
+
+func (s *Store) ListChatSessions(ctx context.Context, userID, classID int64) ([]ChatSession, error) {
+	rows, err := s.DB.QueryContext(ctx, `SELECT id, title, prompt_id, skill_id, created_at, updated_at FROM chat_sessions WHERE user_id=? AND class_id=? ORDER BY updated_at DESC, id DESC`, userID, classID)
+	if err != nil { return nil, err }; defer rows.Close(); items := []ChatSession{}
+	for rows.Next() { var item ChatSession; if err := rows.Scan(&item.ID, &item.Title, &item.PromptID, &item.SkillID, &item.CreatedAt, &item.UpdatedAt); err != nil { return nil, err }; items = append(items, item) }; return items, rows.Err()
+}
+
+func (s *Store) PromptAndSkill(ctx context.Context, promptID, skillID *int64, classID int64, requireActive bool) (Prompt, Skill, error) {
+	var prompt Prompt; var skill Skill
+	if promptID != nil {
+		query := `SELECT id, name, content FROM teacher_prompts WHERE id=? AND class_id=?`; if requireActive { query += ` AND is_active=TRUE` }
+		err := s.DB.QueryRowContext(ctx, query, *promptID, classID).Scan(&prompt.ID, &prompt.Name, &prompt.Content)
+		if err != nil { return Prompt{}, Skill{}, ErrNotFound }
+	} else if err := s.DB.QueryRowContext(ctx, `SELECT id, name, content FROM teacher_prompts WHERE class_id=? AND is_active=TRUE ORDER BY id LIMIT 1`, classID).Scan(&prompt.ID, &prompt.Name, &prompt.Content); err != nil { return Prompt{}, Skill{}, err }
+	if skillID != nil {
+		query := `SELECT id, slug, name, instructions FROM teacher_skills WHERE id=? AND class_id=?`; if requireActive { query += ` AND is_active=TRUE` }
+		err := s.DB.QueryRowContext(ctx, query, *skillID, classID).Scan(&skill.ID, &skill.Slug, &skill.Name, &skill.Instructions)
+		if err != nil { return Prompt{}, Skill{}, ErrNotFound }
+	} else if err := s.DB.QueryRowContext(ctx, `SELECT id, slug, name, instructions FROM teacher_skills WHERE class_id=? AND is_active=TRUE ORDER BY id LIMIT 1`, classID).Scan(&skill.ID, &skill.Slug, &skill.Name, &skill.Instructions); err != nil { return Prompt{}, Skill{}, err }
+	return prompt, skill, nil
+}
+
+func (s *Store) AddChatMessage(ctx context.Context, sessionID, classID int64, role, content string, citations []SearchHit) (int64, error) {
+	encoded, err := json.Marshal(citations); if err != nil { return 0, err }
+	result, err := s.DB.ExecContext(ctx, `INSERT INTO chat_messages (session_id, class_id, role, content, citations) VALUES (?, ?, ?, ?, ?)`, sessionID, classID, role, content, string(encoded))
+	if err != nil { return 0, err }; return result.LastInsertId()
+}
+
+func (s *Store) ChatHistory(ctx context.Context, sessionID int64, limit int) ([]ChatMessage, error) {
+	rows, err := s.DB.QueryContext(ctx, `SELECT id, role, content, citations, created_at FROM (SELECT id, role, content, citations, created_at FROM chat_messages WHERE session_id=? ORDER BY id DESC LIMIT ?) recent ORDER BY id`, sessionID, limit)
+	if err != nil { return nil, err }; defer rows.Close(); items := []ChatMessage{}
+	for rows.Next() { var item ChatMessage; var encoded []byte; if err := rows.Scan(&item.ID, &item.Role, &item.Content, &encoded, &item.CreatedAt); err != nil { return nil, err }; if err := json.Unmarshal(encoded, &item.Citations); err != nil { return nil, err }; items = append(items, item) }; return items, rows.Err()
 }
