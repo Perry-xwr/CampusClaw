@@ -12,3 +12,5 @@ mysql_data/
 qdrant_data/
 tmp/
 temp/
+apitest/reports/
+apitest/**/__pycache__/
