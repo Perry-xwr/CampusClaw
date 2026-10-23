@@ -29,9 +29,15 @@ class Context:
     created_skills: list = field(default_factory=list)
     created_sessions: list = field(default_factory=list)
     issued_tokens: list = field(default_factory=list)
+    created_mcp_servers: list = field(default_factory=list)
+    created_materials: list = field(default_factory=list)
+    mcp_server_id: int = 0
+    mcp_server_name: str = ""
 
-    def request(self, method: str, path: str, token: str = "", payload=None):
+    def request(self, method: str, path: str, token: str = "", payload=None, extra_headers=None):
         headers = {"Accept": "application/json"}
+        if extra_headers:
+            headers.update(extra_headers)
         body = None
         if token:
             headers["Authorization"] = f"Bearer {token}"
@@ -78,15 +84,21 @@ class Context:
     def cleanup_created_data(self) -> list[str]:
         """Delete only IDs returned to this process by this run's create requests."""
         errors = []
-        for token in self.issued_tokens:
+        for material_id, title in reversed(self.created_materials):
             try:
-                status, _, _ = self.request("POST", "/api/logout", token=token)
-                if status != 204:
-                    errors.append("login session could not be revoked through logout API")
+                status, _, _ = self.request("DELETE", f"/api/materials/{int(material_id)}", token=self.token_a_teacher)
+                if status not in (204, 404):
+                    errors.append(f"temporary material {material_id} delete retry returned HTTP {status}")
+                    continue
+                safe_title = str(title).replace("'", "''")
+                remaining = self.db_scalar(f"SELECT COUNT(*) FROM materials WHERE id={int(material_id)} AND class_id=1 AND uploader_id=1 AND title='{safe_title}'")
+                if remaining != "0":
+                    errors.append(f"temporary material {material_id} remains; retained for review")
             except Exception:
-                errors.append("login session could not be revoked through logout API")
+                errors.append(f"temporary material {material_id} cleanup failed; retained for review")
         for session_id in reversed(self.created_sessions):
             try:
+                self.db_exec(f"DELETE FROM mcp_tool_call_audit WHERE session_id={int(session_id)} AND class_id=1 AND user_id=2")
                 self.db_exec(f"DELETE FROM chat_sessions WHERE id={int(session_id)} AND user_id=2 AND class_id=1")
                 if self.db_scalar(f"SELECT COUNT(*) FROM chat_sessions WHERE id={int(session_id)} AND user_id=2 AND class_id=1") != "0":
                     errors.append(f"session {session_id} remains; retained for review")
@@ -100,14 +112,34 @@ class Context:
                     errors.append(f"skill {skill_id} remains; retained for review")
             except Exception as error:
                 errors.append(f"skill {skill_id}: {error}")
-        for prompt_id, name in reversed(self.created_prompts):
+        for server_id in reversed(self.created_mcp_servers):
             try:
-                safe_name = name.replace("'", "''")
-                self.db_exec(f"DELETE FROM teacher_prompts WHERE id={int(prompt_id)} AND class_id=1 AND created_by=1 AND name LIKE 'APITEST-{self.run_id}%' AND name='{safe_name}'")
+                status, body = self.json("POST", f"/api/mcp/servers/{int(server_id)}/disconnect", self.token_a_teacher)
+                if status not in (200, 404):
+                    errors.append(f"MCP server {server_id} disconnect failed")
+                    continue
+                status, _, _ = self.request("DELETE", f"/api/mcp/servers/{int(server_id)}", token=self.token_a_teacher)
+                if status not in (204, 404):
+                    errors.append(f"MCP server {server_id} retained; DELETE returned {status}")
+            except Exception:
+                errors.append(f"MCP server {server_id} retained; cleanup request failed")
+        for prompt_id, _name in reversed(self.created_prompts):
+            try:
+                # The primary key is captured only from this process's successful create response.
+                # Restrict by the seeded teacher's class and creator; avoid sending non-ASCII labels
+                # through docker.exe's Windows argument encoding for an otherwise-safe cleanup.
+                self.db_exec(f"DELETE FROM teacher_prompts WHERE id={int(prompt_id)} AND class_id=1 AND created_by=1")
                 if self.db_scalar(f"SELECT COUNT(*) FROM teacher_prompts WHERE id={int(prompt_id)} AND class_id=1 AND created_by=1") != "0":
                     errors.append(f"prompt {prompt_id} remains; retained for review")
             except Exception as error:
                 errors.append(f"prompt {prompt_id}: {error}")
+        for token in self.issued_tokens:
+            try:
+                status, _, _ = self.request("POST", "/api/logout", token=token)
+                if status != 204:
+                    errors.append("login session could not be revoked through logout API")
+            except Exception:
+                errors.append("login session could not be revoked through logout API")
         return errors
 
     def mock_stats(self) -> dict:
@@ -117,6 +149,22 @@ class Context:
             raise RuntimeError("Could not inspect model-mock request statistics")
         import json
         return json.loads(result.stdout)
+
+    def mock_traces(self) -> list[dict]:
+        command = ["docker", "compose", "exec", "-T", "model-mock", "python", "-c", "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8081/__test/traces', timeout=5).read().decode())"]
+        result = subprocess.run(command, cwd=ROOT, text=True, encoding="utf-8", errors="replace", capture_output=True, timeout=15)
+        if result.returncode:
+            detail = (result.stderr or result.stdout)[-500:].strip()
+            raise RuntimeError("Could not inspect opt-in model-mock boundary traces: " + detail)
+        return json.loads(result.stdout).get("traces", [])
+
+    def mcp_traces(self) -> list[dict]:
+        command = ["docker", "compose", "exec", "-T", "mcp-demo", "python", "-c", "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8090/__test/traces', timeout=5).read().decode())"]
+        result = subprocess.run(command, cwd=ROOT, text=True, encoding="utf-8", errors="replace", capture_output=True, timeout=15)
+        if result.returncode:
+            detail = (result.stderr or result.stdout)[-500:].strip()
+            raise RuntimeError("Could not inspect opt-in MCP boundary traces: " + detail)
+        return json.loads(result.stdout).get("traces", [])
 
 
 def read_dotenv(path: Path) -> dict[str, str]:

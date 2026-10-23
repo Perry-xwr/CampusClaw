@@ -14,3 +14,5 @@ tmp/
 temp/
 apitest/reports/
 apitest/**/__pycache__/
+**/__pycache__/
+*.pyc

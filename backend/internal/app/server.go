@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,17 +23,28 @@ import (
 type contextKey string
 
 const userContextKey contextKey = "user"
+const testScenarioContextKey contextKey = "test-scenario"
+
+var testScenarioPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,80}$`)
+
+func withTestScenario(ctx context.Context, r *http.Request, enabled bool) context.Context {
+	if !enabled { return ctx }
+	scenario := strings.TrimSpace(r.Header.Get("X-CampusClaw-Test-Scenario"))
+	if !testScenarioPattern.MatchString(scenario) { return ctx }
+	return context.WithValue(ctx, testScenarioContextKey, scenario)
+}
 
 type Server struct {
 	config    Config
 	store     *Store
 	retrieval *RetrievalService
+	mcp       *MCPClient
 	mux       *http.ServeMux
 	upload    sync.Mutex
 }
 
 func NewServer(config Config, store *Store, retrieval *RetrievalService) *Server {
-	s := &Server{config: config, store: store, retrieval: retrieval, mux: http.NewServeMux()}
+	s := &Server{config: config, store: store, retrieval: retrieval, mcp: NewMCPClient(config.MCPAuthToken, config.TestTraceEnabled), mux: http.NewServeMux()}
 	s.routes()
 	return s
 }
@@ -48,6 +60,7 @@ func (s *Server) routes() {
 	s.mux.Handle("GET /api/materials/{id}", s.auth(http.HandlerFunc(s.getMaterial)))
 	s.mux.Handle("GET /api/materials/{id}/file", s.auth(http.HandlerFunc(s.getMaterialFile)))
 	s.mux.Handle("POST /api/materials", s.auth(s.teacher(http.HandlerFunc(s.createMaterial))))
+	s.mux.Handle("DELETE /api/materials/{id}", s.auth(s.teacher(http.HandlerFunc(s.deleteMaterial))))
 	s.mux.Handle("POST /api/materials/{id}/reindex", s.auth(s.teacher(http.HandlerFunc(s.reindexMaterial))))
 	s.mux.Handle("POST /api/knowledge/search", s.auth(http.HandlerFunc(s.searchKnowledge)))
 	s.mux.Handle("POST /api/ask", s.auth(http.HandlerFunc(s.ask)))
@@ -61,6 +74,14 @@ func (s *Server) routes() {
 	s.mux.Handle("POST /api/sessions", s.auth(http.HandlerFunc(s.createChatSession)))
 	s.mux.Handle("GET /api/sessions/{id}/messages", s.auth(http.HandlerFunc(s.listChatMessages)))
 	s.mux.Handle("POST /api/sessions/{id}/messages", s.auth(http.HandlerFunc(s.createChatMessage)))
+	s.mux.Handle("GET /api/mcp/servers", s.auth(s.teacher(http.HandlerFunc(s.listMCPServers))))
+	s.mux.Handle("POST /api/mcp/servers", s.auth(s.teacher(http.HandlerFunc(s.createMCPServer))))
+	s.mux.Handle("PUT /api/mcp/servers/{id}", s.auth(s.teacher(http.HandlerFunc(s.updateMCPServer))))
+	s.mux.Handle("DELETE /api/mcp/servers/{id}", s.auth(s.teacher(http.HandlerFunc(s.deleteMCPServer))))
+	s.mux.Handle("POST /api/mcp/servers/{id}/connect", s.auth(s.teacher(http.HandlerFunc(s.connectMCPServer))))
+	s.mux.Handle("POST /api/mcp/servers/{id}/disconnect", s.auth(s.teacher(http.HandlerFunc(s.disconnectMCPServer))))
+	s.mux.Handle("GET /api/mcp/servers/{id}/tools", s.auth(s.teacher(http.HandlerFunc(s.listMCPTools))))
+	s.mux.Handle("GET /api/mcp/tool-calls", s.auth(s.teacher(http.HandlerFunc(s.listMCPToolCalls))))
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
@@ -108,12 +129,32 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listMaterials(w http.ResponseWriter, r *http.Request) {
-	items, err := s.store.Materials(r.Context(), currentUser(r.Context()).ClassID)
+	user := currentUser(r.Context())
+	items, err := s.store.Materials(r.Context(), user.ClassID, user.Role == "teacher")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not list materials")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"materials": items})
+}
+
+func (s *Server) deleteMaterial(w http.ResponseWriter, r *http.Request) {
+	id, err := materialID(r)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "material not found")
+		return
+	}
+	s.upload.Lock()
+	defer s.upload.Unlock()
+	if err := s.retrieval.DeleteMaterial(r.Context(), id, currentUser(r.Context()).ClassID, s.config.UploadDir); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			writeError(w, http.StatusNotFound, "material not found")
+			return
+		}
+		writeError(w, http.StatusServiceUnavailable, "material deletion is pending; retry the request")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func materialID(r *http.Request) (int64, error) {

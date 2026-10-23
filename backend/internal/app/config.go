@@ -25,6 +25,9 @@ type Config struct {
 	ModelTimeout       time.Duration
 	VectorMinScore     float64
 	KeywordMinScore    float64
+	MCPAuthToken       string
+	MCPAllowedServerURL string
+	TestTraceEnabled   bool
 }
 
 func ConfigFromEnv() (Config, error) {
@@ -70,6 +73,9 @@ func ConfigFromEnv() (Config, error) {
 		ModelTimeout:       time.Duration(timeoutSeconds) * time.Second,
 		VectorMinScore:     vectorMin,
 		KeywordMinScore:    keywordMin,
+		MCPAuthToken:       os.Getenv("MCP_AUTH_TOKEN"),
+		MCPAllowedServerURL: "http://mcp-demo:8090",
+		TestTraceEnabled:   env("CAMPUSCLAW_TEST_TRACE", "false") == "true",
 	}, nil
 }
 

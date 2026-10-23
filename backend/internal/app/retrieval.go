@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -59,7 +61,7 @@ func (service *RetrievalService) Initialize(ctx context.Context) error {
 }
 
 func (service *RetrievalService) Backfill(ctx context.Context) error {
-	rows, err := service.store.DB.QueryContext(ctx, `SELECT k.id, k.material_id, k.class_id, k.content FROM knowledge_entries k LEFT JOIN knowledge_chunks c ON c.knowledge_entry_id=k.id GROUP BY k.id, k.material_id, k.class_id, k.content HAVING COUNT(c.id)=0`)
+	rows, err := service.store.DB.QueryContext(ctx, `SELECT k.id, k.material_id, k.class_id, k.content FROM knowledge_entries k JOIN materials m ON m.id=k.material_id LEFT JOIN knowledge_chunks c ON c.knowledge_entry_id=k.id WHERE m.deletion_pending=FALSE GROUP BY k.id, k.material_id, k.class_id, k.content HAVING COUNT(c.id)=0`)
 	if err != nil {
 		return err
 	}
@@ -86,7 +88,7 @@ func (service *RetrievalService) Backfill(ctx context.Context) error {
 
 func (service *RetrievalService) IndexMaterial(ctx context.Context, materialID, classID int64, options ChunkOptions) error {
 	var source indexedSource
-	err := service.store.DB.QueryRowContext(ctx, `SELECT id, material_id, class_id, content FROM knowledge_entries WHERE material_id=? AND class_id=?`, materialID, classID).Scan(&source.EntryID, &source.MaterialID, &source.ClassID, &source.Content)
+	err := service.store.DB.QueryRowContext(ctx, `SELECT k.id, k.material_id, k.class_id, k.content FROM knowledge_entries k JOIN materials m ON m.id=k.material_id WHERE k.material_id=? AND k.class_id=? AND m.deletion_pending=FALSE`, materialID, classID).Scan(&source.EntryID, &source.MaterialID, &source.ClassID, &source.Content)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
@@ -95,6 +97,18 @@ func (service *RetrievalService) IndexMaterial(ctx context.Context, materialID, 
 	}
 	return service.indexSource(ctx, source, options)
 }
+
+func (service *RetrievalService) DeleteMaterial(ctx context.Context, materialID, classID int64, uploadDir string) error {
+	service.indexMu.Lock()
+	defer service.indexMu.Unlock()
+	storedFilename, err := service.store.StartMaterialDeletion(ctx, materialID, classID)
+	if err != nil { return err }
+	if err := service.qdrant.DeleteMaterialPoints(ctx, materialID, classID); err != nil { return err }
+	path := filepath.Join(uploadDir, filepath.Base(storedFilename))
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) { return err }
+	return service.store.CompleteMaterialDeletion(ctx, materialID, classID)
+}
+
 
 func (service *RetrievalService) indexSource(ctx context.Context, source indexedSource, options ChunkOptions) error {
 	service.indexMu.Lock()
@@ -216,7 +230,10 @@ func (service *RetrievalService) Search(ctx context.Context, classID int64, quer
 }
 
 func (service *RetrievalService) keyword(ctx context.Context, classID int64, query string, limit int) ([]SearchHit, error) {
-	rows, err := service.store.DB.QueryContext(ctx, `SELECT c.id, c.knowledge_entry_id, c.material_id, c.chunk_index, c.start_offset, c.end_offset, c.chunk_text, m.title, MATCH(c.chunk_text) AGAINST (? IN NATURAL LANGUAGE MODE) AS relevance FROM knowledge_chunks c JOIN materials m ON m.id=c.material_id WHERE c.class_id=? AND c.index_status='ready' AND MATCH(c.chunk_text) AGAINST (? IN NATURAL LANGUAGE MODE) >= ? ORDER BY relevance DESC, c.id ASC LIMIT ?`, query, classID, query, service.config.KeywordMinScore, limit)
+	// FULLTEXT relevance is corpus-relative, so an exact literal match can score
+	// below the configured floor even when the requested phrase is present.
+	// Keep the threshold for ranked/soft matches, but do not discard exact hits.
+	rows, err := service.store.DB.QueryContext(ctx, `SELECT c.id, c.knowledge_entry_id, c.material_id, c.chunk_index, c.start_offset, c.end_offset, c.chunk_text, m.title, MATCH(c.chunk_text) AGAINST (? IN NATURAL LANGUAGE MODE) AS relevance FROM knowledge_chunks c JOIN materials m ON m.id=c.material_id WHERE c.class_id=? AND m.deletion_pending=FALSE AND c.index_status='ready' AND (MATCH(c.chunk_text) AGAINST (? IN NATURAL LANGUAGE MODE) >= ? OR LOCATE(?, c.chunk_text) > 0) ORDER BY relevance DESC, c.id ASC LIMIT ?`, query, classID, query, service.config.KeywordMinScore, query, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -247,7 +264,7 @@ func (service *RetrievalService) vector(ctx context.Context, classID int64, quer
 	result := []SearchHit{}
 	for _, match := range matches {
 		var hit SearchHit
-		err := service.store.DB.QueryRowContext(ctx, `SELECT c.id,c.knowledge_entry_id,c.material_id,c.chunk_index,c.start_offset,c.end_offset,c.chunk_text,m.title FROM knowledge_chunks c JOIN materials m ON m.id=c.material_id WHERE c.id=? AND c.class_id=? AND c.index_status='ready'`, match.ID, classID).Scan(&hit.ChunkID, &hit.KnowledgeEntryID, &hit.MaterialID, &hit.ChunkIndex, &hit.StartOffset, &hit.EndOffset, &hit.Excerpt, &hit.MaterialTitle)
+		err := service.store.DB.QueryRowContext(ctx, `SELECT c.id,c.knowledge_entry_id,c.material_id,c.chunk_index,c.start_offset,c.end_offset,c.chunk_text,m.title FROM knowledge_chunks c JOIN materials m ON m.id=c.material_id WHERE c.id=? AND c.class_id=? AND m.deletion_pending=FALSE AND c.index_status='ready'`, match.ID, classID).Scan(&hit.ChunkID, &hit.KnowledgeEntryID, &hit.MaterialID, &hit.ChunkIndex, &hit.StartOffset, &hit.EndOffset, &hit.Excerpt, &hit.MaterialTitle)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
 		}

@@ -56,8 +56,20 @@ func (s *Store) Migrate(ctx context.Context) error {
 			return err
 		}
 		for _, statement := range strings.Split(string(body), ";") {
-			if strings.TrimSpace(statement) == "" {
+			statement = strings.TrimSpace(statement)
+			if statement == "" {
 				continue
+			}
+			if strings.HasPrefix(strings.ToUpper(statement), "ALTER TABLE ") {
+				parts := strings.Fields(statement)
+				if len(parts) < 6 || strings.ToUpper(parts[3]) != "ADD" || strings.ToUpper(parts[4]) != "COLUMN" {
+					return fmt.Errorf("migration %s: unsupported alter statement", entry.Name())
+				}
+				var exists int
+				if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=?`, parts[2], parts[5]).Scan(&exists); err != nil {
+					return fmt.Errorf("migration %s: could not inspect column: %w", entry.Name(), err)
+				}
+				if exists > 0 { continue }
 			}
 			if _, err := s.DB.ExecContext(ctx, statement); err != nil {
 				return fmt.Errorf("migration %s: %w", entry.Name(), err)
@@ -106,17 +118,26 @@ func (s *Store) seed(ctx context.Context) error {
 		{1, 1, 1, "A 班太阳能实验讲义", "seed-a.txt", "A班课程的太阳能电池实验使用钙钛矿材料。学生需要在实验前完成安全培训，并佩戴护目镜。"},
 		{2, 2, 3, "B 班量子通信讲义", "seed-b.txt", "B班独有的量子通信实验使用纠缠光子，并通过量子密钥分发验证通信安全。"},
 	}
-	for _, item := range seedMaterials {
-		if _, err := tx.ExecContext(ctx, `INSERT IGNORE INTO materials (id, class_id, uploader_id, title, original_filename, stored_filename) VALUES (?, ?, ?, ?, ?, ?)`, item.id, item.classID, item.uploaderID, item.title, item.filename, item.filename); err != nil {
-			return err
+	var materialSeedsInitialized int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM campusclaw_seed_state WHERE seed_name='initial-materials-v1'`).Scan(&materialSeedsInitialized); err != nil {
+		return err
+	}
+	if materialSeedsInitialized == 0 {
+		for _, item := range seedMaterials {
+			if _, err := tx.ExecContext(ctx, `INSERT IGNORE INTO materials (id, class_id, uploader_id, title, original_filename, stored_filename) VALUES (?, ?, ?, ?, ?, ?)`, item.id, item.classID, item.uploaderID, item.title, item.filename, item.filename); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT IGNORE INTO knowledge_entries (material_id, class_id, content) VALUES (?, ?, ?)`, item.id, item.classID, item.content); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE materials SET title=? WHERE id=? AND class_id=?`, item.title, item.id, item.classID); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE knowledge_entries SET content=? WHERE material_id=? AND class_id=?`, item.content, item.id, item.classID); err != nil {
+				return err
+			}
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT IGNORE INTO knowledge_entries (material_id, class_id, content) VALUES (?, ?, ?)`, item.id, item.classID, item.content); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE materials SET title=? WHERE id=? AND class_id=?`, item.title, item.id, item.classID); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE knowledge_entries SET content=? WHERE material_id=? AND class_id=?`, item.content, item.id, item.classID); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO campusclaw_seed_state (seed_name) VALUES ('initial-materials-v1')`); err != nil {
 			return err
 		}
 	}
@@ -169,8 +190,13 @@ func (s *Store) DeleteSession(ctx context.Context, token string) error {
 	return err
 }
 
-func (s *Store) Materials(ctx context.Context, classID int64) ([]Material, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT m.id, m.title, m.original_filename, u.username, m.created_at FROM materials m JOIN users u ON u.id=m.uploader_id WHERE m.class_id=? ORDER BY m.created_at DESC, m.id DESC`, classID)
+func (s *Store) Materials(ctx context.Context, classID int64, includePending bool) ([]Material, error) {
+	query := `SELECT m.id, m.title, m.original_filename, u.username, m.created_at, m.deletion_pending FROM materials m JOIN users u ON u.id=m.uploader_id WHERE m.class_id=?`
+	if !includePending {
+		query += ` AND m.deletion_pending=FALSE`
+	}
+	query += ` ORDER BY m.created_at DESC, m.id DESC`
+	rows, err := s.DB.QueryContext(ctx, query, classID)
 	if err != nil {
 		return nil, err
 	}
@@ -178,7 +204,7 @@ func (s *Store) Materials(ctx context.Context, classID int64) ([]Material, error
 	items := []Material{}
 	for rows.Next() {
 		var item Material
-		if err := rows.Scan(&item.ID, &item.Title, &item.OriginalFilename, &item.Uploader, &item.CreatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.Title, &item.OriginalFilename, &item.Uploader, &item.CreatedAt, &item.DeletionPending); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
@@ -189,12 +215,34 @@ func (s *Store) Materials(ctx context.Context, classID int64) ([]Material, error
 func (s *Store) Material(ctx context.Context, id, classID int64) (Material, string, error) {
 	var item Material
 	var stored string
-	err := s.DB.QueryRowContext(ctx, `SELECT m.id, m.title, m.original_filename, u.username, m.created_at, m.stored_filename FROM materials m JOIN users u ON u.id=m.uploader_id WHERE m.id=? AND m.class_id=?`, id, classID).
+	err := s.DB.QueryRowContext(ctx, `SELECT m.id, m.title, m.original_filename, u.username, m.created_at, m.stored_filename FROM materials m JOIN users u ON u.id=m.uploader_id WHERE m.id=? AND m.class_id=? AND m.deletion_pending=FALSE`, id, classID).
 		Scan(&item.ID, &item.Title, &item.OriginalFilename, &item.Uploader, &item.CreatedAt, &stored)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Material{}, "", ErrNotFound
 	}
 	return item, stored, err
+}
+
+func (s *Store) StartMaterialDeletion(ctx context.Context, id, classID int64) (string, error) {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil { return "", err }
+	defer tx.Rollback()
+	var stored string
+	err = tx.QueryRowContext(ctx, `SELECT stored_filename FROM materials WHERE id=? AND class_id=? FOR UPDATE`, id, classID).Scan(&stored)
+	if errors.Is(err, sql.ErrNoRows) { return "", ErrNotFound }
+	if err != nil { return "", err }
+	if _, err := tx.ExecContext(ctx, `UPDATE materials SET deletion_pending=TRUE WHERE id=? AND class_id=?`, id, classID); err != nil { return "", err }
+	if err := tx.Commit(); err != nil { return "", err }
+	return stored, nil
+}
+
+func (s *Store) CompleteMaterialDeletion(ctx context.Context, id, classID int64) error {
+	result, err := s.DB.ExecContext(ctx, `DELETE FROM materials WHERE id=? AND class_id=? AND deletion_pending=TRUE`, id, classID)
+	if err != nil { return err }
+	changed, err := result.RowsAffected()
+	if err != nil { return err }
+	if changed == 0 { return ErrNotFound }
+	return nil
 }
 
 func (s *Store) ListPrompts(ctx context.Context, classID int64) ([]Prompt, error) {
@@ -222,25 +270,31 @@ func (s *Store) SavePrompt(ctx context.Context, classID, userID, id int64, name,
 }
 
 func (s *Store) ListSkills(ctx context.Context, classID int64, activeOnly bool) ([]Skill, error) {
-	query := `SELECT id, slug, name, instructions, is_active, updated_at FROM teacher_skills WHERE class_id=?`
+	query := `SELECT id, slug, name, instructions, tools, is_active, updated_at FROM teacher_skills WHERE class_id=?`
 	if activeOnly { query += ` AND is_active=TRUE` }
 	query += ` ORDER BY is_active DESC, id`
 	rows, err := s.DB.QueryContext(ctx, query, classID); if err != nil { return nil, err }; defer rows.Close()
 	items := []Skill{}
-	for rows.Next() { var item Skill; if err := rows.Scan(&item.ID, &item.Slug, &item.Name, &item.Instructions, &item.IsActive, &item.UpdatedAt); err != nil { return nil, err }; items = append(items, item) }
+	for rows.Next() { var item Skill; var tools []byte; if err := rows.Scan(&item.ID, &item.Slug, &item.Name, &item.Instructions, &tools, &item.IsActive, &item.UpdatedAt); err != nil { return nil, err }; if len(tools) > 0 { if err := json.Unmarshal(tools, &item.Tools); err != nil { return nil, err } }; if item.Tools == nil { item.Tools = []MCPToolBinding{} }; items = append(items, item) }
 	return items, rows.Err()
 }
 
-func (s *Store) SaveSkill(ctx context.Context, classID, userID, id int64, slug, name, instructions string, active bool) (Skill, error) {
+
+func (s *Store) SaveSkill(ctx context.Context, classID, userID, id int64, slug, name, instructions string, tools []MCPToolBinding, active bool) (Skill, error) {
+	encodedTools, err := json.Marshal(tools)
+	if err != nil { return Skill{}, err }
 	if id == 0 {
-		result, err := s.DB.ExecContext(ctx, `INSERT INTO teacher_skills (class_id, created_by, slug, name, instructions, is_active) VALUES (?, ?, ?, ?, ?, ?)`, classID, userID, slug, name, instructions, active)
+		result, err := s.DB.ExecContext(ctx, `INSERT INTO teacher_skills (class_id, created_by, slug, name, instructions, tools, is_active) VALUES (?, ?, ?, ?, ?, ?, ?)`, classID, userID, slug, name, instructions, string(encodedTools), active)
 		if err != nil { return Skill{}, err }; id, err = result.LastInsertId(); if err != nil { return Skill{}, err }
 	} else {
-		result, err := s.DB.ExecContext(ctx, `UPDATE teacher_skills SET slug=?, name=?, instructions=?, is_active=? WHERE id=? AND class_id=?`, slug, name, instructions, active, id, classID)
+		result, err := s.DB.ExecContext(ctx, `UPDATE teacher_skills SET slug=?, name=?, instructions=?, tools=?, is_active=? WHERE id=? AND class_id=?`, slug, name, instructions, string(encodedTools), active, id, classID)
 		if err != nil { return Skill{}, err }; changed, err := result.RowsAffected(); if err != nil { return Skill{}, err }; if changed == 0 { var exists int; if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM teacher_skills WHERE id=? AND class_id=?`, id, classID).Scan(&exists); err != nil { return Skill{}, err }; if exists == 0 { return Skill{}, ErrNotFound } }
 	}
 	var item Skill
-	err := s.DB.QueryRowContext(ctx, `SELECT id, slug, name, instructions, is_active, updated_at FROM teacher_skills WHERE id=? AND class_id=?`, id, classID).Scan(&item.ID, &item.Slug, &item.Name, &item.Instructions, &item.IsActive, &item.UpdatedAt)
+	var savedTools []byte
+	err = s.DB.QueryRowContext(ctx, `SELECT id, slug, name, instructions, tools, is_active, updated_at FROM teacher_skills WHERE id=? AND class_id=?`, id, classID).Scan(&item.ID, &item.Slug, &item.Name, &item.Instructions, &savedTools, &item.IsActive, &item.UpdatedAt)
+	if err == nil && len(savedTools) > 0 { err = json.Unmarshal(savedTools, &item.Tools) }
+	if item.Tools == nil { item.Tools = []MCPToolBinding{} }
 	return item, err
 }
 
@@ -270,21 +324,25 @@ func (s *Store) PromptAndSkill(ctx context.Context, promptID, skillID *int64, cl
 		if err != nil { return Prompt{}, Skill{}, ErrNotFound }
 	} else if err := s.DB.QueryRowContext(ctx, `SELECT id, name, content FROM teacher_prompts WHERE class_id=? AND is_active=TRUE ORDER BY id LIMIT 1`, classID).Scan(&prompt.ID, &prompt.Name, &prompt.Content); err != nil { return Prompt{}, Skill{}, err }
 	if skillID != nil {
-		query := `SELECT id, slug, name, instructions FROM teacher_skills WHERE id=? AND class_id=?`; if requireActive { query += ` AND is_active=TRUE` }
-		err := s.DB.QueryRowContext(ctx, query, *skillID, classID).Scan(&skill.ID, &skill.Slug, &skill.Name, &skill.Instructions)
+		query := `SELECT id, slug, name, instructions, tools FROM teacher_skills WHERE id=? AND class_id=?`; if requireActive { query += ` AND is_active=TRUE` }
+		var tools []byte
+		err := s.DB.QueryRowContext(ctx, query, *skillID, classID).Scan(&skill.ID, &skill.Slug, &skill.Name, &skill.Instructions, &tools)
 		if err != nil { return Prompt{}, Skill{}, ErrNotFound }
+		if len(tools) > 0 { if err := json.Unmarshal(tools, &skill.Tools); err != nil { return Prompt{}, Skill{}, err } }
 	} else if err := s.DB.QueryRowContext(ctx, `SELECT id, slug, name, instructions FROM teacher_skills WHERE class_id=? AND is_active=TRUE ORDER BY id LIMIT 1`, classID).Scan(&skill.ID, &skill.Slug, &skill.Name, &skill.Instructions); err != nil { return Prompt{}, Skill{}, err }
+	if skill.Tools == nil { skill.Tools = []MCPToolBinding{} }
 	return prompt, skill, nil
 }
 
-func (s *Store) AddChatMessage(ctx context.Context, sessionID, classID int64, role, content string, citations []SearchHit) (int64, error) {
+func (s *Store) AddChatMessage(ctx context.Context, sessionID, classID int64, role, content string, citations []SearchHit, toolCalls ...[]MCPToolCallStatus) (int64, error) {
 	encoded, err := json.Marshal(citations); if err != nil { return 0, err }
-	result, err := s.DB.ExecContext(ctx, `INSERT INTO chat_messages (session_id, class_id, role, content, citations) VALUES (?, ?, ?, ?, ?)`, sessionID, classID, role, content, string(encoded))
+	encodedTools, err := json.Marshal([]MCPToolCallStatus{}); if err != nil { return 0, err }; if len(toolCalls) > 0 && toolCalls[0] != nil { encodedTools, err = json.Marshal(toolCalls[0]); if err != nil { return 0, err } }
+	result, err := s.DB.ExecContext(ctx, `INSERT INTO chat_messages (session_id, class_id, role, content, citations, tool_calls) VALUES (?, ?, ?, ?, ?, ?)`, sessionID, classID, role, content, string(encoded), string(encodedTools))
 	if err != nil { return 0, err }; return result.LastInsertId()
 }
 
 func (s *Store) ChatHistory(ctx context.Context, sessionID int64, limit int) ([]ChatMessage, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT id, role, content, citations, created_at FROM (SELECT id, role, content, citations, created_at FROM chat_messages WHERE session_id=? ORDER BY id DESC LIMIT ?) recent ORDER BY id`, sessionID, limit)
+	rows, err := s.DB.QueryContext(ctx, `SELECT id, role, content, citations, tool_calls, created_at FROM (SELECT id, role, content, citations, tool_calls, created_at FROM chat_messages WHERE session_id=? ORDER BY id DESC LIMIT ?) recent ORDER BY id`, sessionID, limit)
 	if err != nil { return nil, err }; defer rows.Close(); items := []ChatMessage{}
-	for rows.Next() { var item ChatMessage; var encoded []byte; if err := rows.Scan(&item.ID, &item.Role, &item.Content, &encoded, &item.CreatedAt); err != nil { return nil, err }; if err := json.Unmarshal(encoded, &item.Citations); err != nil { return nil, err }; items = append(items, item) }; return items, rows.Err()
+	for rows.Next() { var item ChatMessage; var encoded, encodedTools []byte; if err := rows.Scan(&item.ID, &item.Role, &item.Content, &encoded, &encodedTools, &item.CreatedAt); err != nil { return nil, err }; if err := json.Unmarshal(encoded, &item.Citations); err != nil { return nil, err }; if len(encodedTools) > 0 { if err := json.Unmarshal(encodedTools, &item.ToolCalls); err != nil { return nil, err } }; items = append(items, item) }; return items, rows.Err()
 }

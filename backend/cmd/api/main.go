@@ -27,6 +27,9 @@ func main() {
 	if err := store.Migrate(context.Background()); err != nil {
 		log.Fatal(err)
 	}
+	if err := app.RestoreSeedMaterialFiles(context.Background(), store, config.UploadDir); err != nil {
+		log.Fatal(err)
+	}
 	retrieval := app.NewRetrievalService(config, store)
 	if err := retrieval.Initialize(context.Background()); err != nil {
 		log.Fatal(err)

@@ -23,6 +23,7 @@ type ModelClient struct {
 	chatKey        string
 	chatModel      string
 	dimension      int
+	traceEnabled   bool
 	http           *http.Client
 }
 
@@ -35,6 +36,7 @@ func NewModelClient(config Config) *ModelClient {
 		chatKey:        config.ChatAPIKey,
 		chatModel:      config.ChatModel,
 		dimension:      config.EmbeddingDimension,
+		traceEnabled:   config.TestTraceEnabled,
 		http:           &http.Client{Timeout: config.ModelTimeout},
 	}
 }
@@ -103,6 +105,7 @@ func (client *ModelClient) ChatStream(ctx context.Context, system string, histor
 	if err != nil { return "", err }
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "text/event-stream")
+	client.addTestScenarioHeader(ctx, request)
 	if client.chatKey != "" { request.Header.Set("Authorization", "Bearer "+client.chatKey) }
 	response, err := client.http.Do(request)
 	if err != nil { return "", fmt.Errorf("chat stream failed: %w", ErrDependencyUnavailable) }
@@ -140,6 +143,7 @@ func (client *ModelClient) post(ctx context.Context, url, key string, requestBod
 		return err
 	}
 	request.Header.Set("Content-Type", "application/json")
+	client.addTestScenarioHeader(ctx, request)
 	if key != "" {
 		request.Header.Set("Authorization", "Bearer "+key)
 	}
@@ -154,6 +158,13 @@ func (client *ModelClient) post(ctx context.Context, url, key string, requestBod
 	}
 	decoder := json.NewDecoder(io.LimitReader(response.Body, 4<<20))
 	return decoder.Decode(responseBody)
+}
+
+func (client *ModelClient) addTestScenarioHeader(ctx context.Context, request *http.Request) {
+	if !client.traceEnabled || !strings.HasPrefix(client.chatURL, "http://model-mock:") { return }
+	if scenario, ok := ctx.Value(testScenarioContextKey).(string); ok && testScenarioPattern.MatchString(scenario) {
+		request.Header.Set("X-CampusClaw-Test-Scenario", scenario)
+	}
 }
 
 type QdrantClient struct {
@@ -234,6 +245,14 @@ func (client *QdrantClient) Delete(ctx context.Context, ids []int64) error {
 		return nil
 	}
 	return client.requestJSON(ctx, http.MethodPost, "/collections/"+client.collection+"/points/delete?wait=true", map[string]any{"points": ids}, nil)
+}
+
+func (client *QdrantClient) DeleteMaterialPoints(ctx context.Context, materialID, classID int64) error {
+	filter := map[string]any{"must": []map[string]any{
+		{"key": "material_id", "match": map[string]any{"value": materialID}},
+		{"key": "class_id", "match": map[string]any{"value": classID}},
+	}}
+	return client.requestJSON(ctx, http.MethodPost, "/collections/"+client.collection+"/points/delete?wait=true", map[string]any{"filter": filter}, nil)
 }
 
 func (client *QdrantClient) Search(ctx context.Context, vector []float32, classID int64, limit int, threshold float64) ([]VectorMatch, error) {

@@ -1,6 +1,6 @@
-# CampusClaw · Iteration 1 + 2
+# CampusClaw · 班级知识库与 AI 学习助手
 
-CampusClaw 是课程用教研智能体平台。Iteration 1 交付 Bearer 登录、教师/学生权限、班级隔离和材料入库；Iteration 2 在此基础上加入 MySQL + Qdrant 的可追溯知识检索和有依据才生成的简短回答。规约位于 `openspec/changes/`。
+CampusClaw 是课程用班级知识管理与 AI 学习平台，采用 React + TypeScript、Go、MySQL、Qdrant 和 Docker Compose。系统包含 Bearer Token 认证、教师/学生 RBAC、班级隔离、可追溯 RAG 问答、提示词与 Skill 管理、MCP 工具接入和 SSE 会话。项目用于课程演示与学习，不应直接视为生产部署模板。
 
 ## 功能
 
@@ -15,6 +15,22 @@ CampusClaw 是课程用教研智能体平台。Iteration 1 交付 Bearer 登录�
 - keyword、vector、hybrid 检索；hybrid 使用 RRF（k=60）
 - 每条命中返回材料、知识条目、切片、字符区间和 MySQL 正文摘录
 - `/api/ask` 仅在本班检索有依据后生成非流式简短回答
+
+### Lesson 5–6：对话、Skill 与 MCP
+
+- 教师管理提示词模板和学习 Skill；学生创建会话并通过 SSE 接收回答及引用。
+- 浏览器导入 `.md` / `.txt` Skill 时读取文件文本，再把指令文本保存到 CampusClaw，不上传本地文件路径。
+- 同仓 `mcp-server/` 提供 `formula_hint`、`unit_convert`。Host 按技能绑定与确定性规则选择工具，不使用模型原生 function calling。
+- 服务端检查身份、班级、绑定及调用限制，并记录工具审计。
+- Swagger UI：<http://localhost:8080/docs/>；OpenAPI：`frontend/public/docs/openapi.yaml`。
+
+### Chat 模型配置
+
+- 默认 Chat 使用本地 `model-mock`，适用于离线开发和自动化验收。
+- 可通过 `CHAT_BASE_URL`、`CHAT_MODEL`、`CHAT_API_KEY` 配置 OpenAI-compatible Chat API；Compose 也兼容映射 `GLM_BASE_URL`、`GLM_MODEL`、`GLM_API_KEY`。智谱示例见 `.env.example`。
+- 用户必须自行获取并在本机 `.env` 配置 API Key。仓库不提供真实密钥；不要提交 `.env`、Key 或带认证头的 Trace。
+- Chat 与 Embedding 分别配置。默认 Embedding 使用 `model-mock`、维度 16；更换 Embedding 前需匹配维度并评估索引，不能只修改 Chat 配置。
+- 真实模型请求可能产生费用。自动化测试默认使用 mock，不代表真实模型或所有 MCP 场景均已完成最终验收。
 
 本项目仍不做通用 AI Chat、流式多轮对话、智能备课/命题、作业提交/批改、注册/找回密码、OAuth/SSO、Kubernetes 或多副本部署。
 
@@ -86,15 +102,9 @@ Invoke-RestMethod http://localhost:8080/health
 
 除登录和健康检查外，API 请求必须携带 `Authorization: Bearer <token>`。数据库只保存 token 的 SHA-256 哈希；后端使用 token 查询服务端 session，并以 session 关联的用户、角色和班级作为权限依据，客户端提交的 `role` 或 `class_id` 不会改变身份。前端为课程演示将 token 保存在 `localStorage`；这不是对生产环境最佳安全方案的声明。
 
-## 测试账号
+## 本地演示账号
 
-| 用户名 | 密码 | 角色 | 班级 |
-|---|---|---|---|
-| `teacher_a` | `TeacherA123!` | teacher | A 班 |
-| `student_a1` | `StudentA123!` | student | A 班 |
-| `student_b1` | `StudentB123!` | student | B 班 |
-
-数据库只保存运行时生成的 bcrypt 哈希，不保存表中的明文密码。以上密码仅是课程演示凭据。
+仅限本地开发数据库中的种子账号使用。首次启动后，请查看本地开发配置或重置为自有的开发凭据；不要在公网部署中启用或复用课程种子账号。数据库保存密码哈希。仓库不发布可用于公网的账号密码。
 
 ## 演示与验收
 
@@ -136,11 +146,7 @@ docker compose up -d
 docker compose down
 ```
 
-彻底清理数据库与上传文件（不可恢复，仅在明确需要重置演示数据时执行）：
-
-```powershell
-docker compose down -v
-```
+不要用 `docker compose down -v` 作为普通停止命令；`-v` 会删除数据库、上传文件和向量数据卷，造成数据丢失。
 
 ## 健康检查
 
@@ -192,7 +198,9 @@ API 只用最新一条 user 消息执行本班 hybrid 检索并取前 4 条。�
 
 默认 Compose 使用内部 `model-mock`。它是固定维度、确定性、OpenAI-compatible 的课程测试服务，不是真实大模型，不应被描述为真实 AI 能力。它不发布宿主机端口，业务代码只通过统一 HTTP client 调用。
 
-切换真实 OpenAI-compatible provider 时在 `.env` 配置：
+真实 OpenAI-compatible Chat 与 Embedding 是独立服务配置。Chat 可配置 `CHAT_BASE_URL`、`CHAT_API_KEY`、`CHAT_MODEL`；Compose 也支持由 `GLM_BASE_URL`、`GLM_API_KEY`、`GLM_MODEL` 映射智谱 Chat。Embedding 默认继续使用 `model-mock`，不要为切换 Chat 而更改向量维度。复制 `.env.example` 为 `.env` 后，由使用者自行填写密钥；不要提交 `.env` 或真实 Key。
+
+如需切换 Embedding provider，才单独配置：
 
 ```dotenv
 EMBEDDING_BASE_URL=https://provider.example/v1

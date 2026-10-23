@@ -34,11 +34,26 @@ services:
       context: ./model-mock
     environment:
       EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-16}
+      CAMPUSCLAW_TEST_TRACE: ${CAMPUSCLAW_TEST_TRACE:-false}
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8081/health"]
       interval: 5s
       timeout: 3s
       retries: 12
+      start_period: 5s
+    restart: unless-stopped
+
+  mcp-demo:
+    build:
+      context: ./mcp-server
+    environment:
+      MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN:-}
+      CAMPUSCLAW_TEST_TRACE: ${CAMPUSCLAW_TEST_TRACE:-false}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
       start_period: 5s
     restart: unless-stopped
 
@@ -56,12 +71,14 @@ services:
       EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-campusclaw-mock-embedding}
       EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-16}
-      CHAT_BASE_URL: ${CHAT_BASE_URL:-http://model-mock:8081}
-      CHAT_API_KEY: ${CHAT_API_KEY:-}
-      CHAT_MODEL: ${CHAT_MODEL:-campusclaw-mock-chat}
-      MODEL_TIMEOUT_SECONDS: ${MODEL_TIMEOUT_SECONDS:-10}
+      CHAT_BASE_URL: ${CHAT_BASE_URL:-${GLM_BASE_URL:-http://model-mock:8081}}
+      CHAT_API_KEY: ${CHAT_API_KEY:-${GLM_API_KEY:-}}
+      CHAT_MODEL: ${CHAT_MODEL:-${GLM_MODEL:-campusclaw-mock-chat}}
+      MODEL_TIMEOUT_SECONDS: ${MODEL_TIMEOUT_SECONDS:-60}
       VECTOR_MIN_SCORE: ${VECTOR_MIN_SCORE:-0.35}
       KEYWORD_MIN_SCORE: ${KEYWORD_MIN_SCORE:-0.01}
+      MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN:-}
+      CAMPUSCLAW_TEST_TRACE: ${CAMPUSCLAW_TEST_TRACE:-false}
     volumes:
       - uploads_data:/data/uploads
     depends_on:

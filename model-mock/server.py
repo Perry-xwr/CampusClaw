@@ -2,12 +2,40 @@ import hashlib
 import json
 import math
 import os
+import re
+import threading
 import time
+import uuid
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 DIMENSION = int(os.getenv("EMBEDDING_DIMENSION", "16"))
 COUNTERS = {"embeddings": 0, "chat": 0}
 LAST = {"last_chat_messages": []}
+TRACE_ENABLED = os.getenv("CAMPUSCLAW_TEST_TRACE", "false").lower() == "true"
+TRACES = []
+TRACE_LOCK = threading.Lock()
+SCENARIO_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,80}$")
+
+
+def record_trace(scenario, request, response, status, stream_events=None):
+    if not TRACE_ENABLED or not SCENARIO_PATTERN.fullmatch(scenario or ""):
+        return
+    item = {
+        "trace_id": str(uuid.uuid4()),
+        "scenario": scenario,
+        "url": "http://model-mock:8081/chat/completions",
+        "method": "POST",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "status": status,
+        "request": request,
+        "response": response,
+    }
+    if stream_events is not None:
+        item["stream_events"] = stream_events
+    with TRACE_LOCK:
+        TRACES.append(item)
+        del TRACES[:-200]
 
 
 def vector_for(text):
@@ -57,6 +85,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(200, {"status": "ok", "provider": "deterministic-mock"})
         elif self.path == "/stats":
             self.send_json(200, {**COUNTERS, **LAST})
+        elif self.path == "/__test/traces" and TRACE_ENABLED:
+            with TRACE_LOCK:
+                self.send_json(200, {"traces": list(TRACES)})
         else:
             self.send_json(404, {"error": "not found"})
 
@@ -69,6 +100,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/reset":
             COUNTERS.update(embeddings=0, chat=0)
             LAST["last_chat_messages"] = []
+            with TRACE_LOCK:
+                TRACES.clear()
             self.send_json(200, {**COUNTERS, **LAST})
             return
         if self.path == "/embeddings":
@@ -99,15 +132,21 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Cache-Control", "no-cache")
                 self.send_header("Connection", "keep-alive")
                 self.end_headers()
+                stream_events = []
                 for token in (content[index:index + 2] for index in range(0, len(content), 2)):
                     event = {"choices": [{"index": 0, "delta": {"content": token}, "finish_reason": None}]}
+                    stream_events.append(event)
                     self.wfile.write(("data: " + json.dumps(event, ensure_ascii=False) + "\n\n").encode("utf-8"))
                     self.wfile.flush()
                     time.sleep(0.01)
+                stream_events.append("[DONE]")
                 self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()
+                record_trace(self.headers.get("X-CampusClaw-Test-Scenario", ""), request, {"content_type": "text/event-stream", "events": stream_events}, 200, stream_events)
                 return
-            self.send_json(200, {"id": "mock-chat", "object": "chat.completion", "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}]})
+            result = {"id": "mock-chat", "object": "chat.completion", "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}]}
+            record_trace(self.headers.get("X-CampusClaw-Test-Scenario", ""), request, result, 200)
+            self.send_json(200, result)
             return
         self.send_json(404, {"error": "not found"})
 

@@ -1,12 +1,30 @@
 package app
 
 import (
+	"context"
 	"mime/multipart"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestRenderPromptTemplateUsesServerContext(t *testing.T) {
+	user := User{Username: "demo_student", ClassName: "A 班"}
+	got := renderPromptTemplate("班级={{class_name}} 用户={{username}} 问题={{question}}", user, "实验准备？")
+	want := "班级=A 班 用户=demo_student 问题=实验准备？"
+	if got != want { t.Fatalf("renderPromptTemplate() = %q, want %q", got, want) }
+}
+
+func TestWithTestScenarioRequiresOptInAndSafeLabel(t *testing.T) {
+	r := httptest.NewRequest("POST", "/", nil)
+	r.Header.Set("X-CampusClaw-Test-Scenario", "exp1-prompt-template")
+	if _, ok := withTestScenario(context.Background(), r, false).Value(testScenarioContextKey).(string); ok { t.Fatal("scenario accepted while tracing is disabled") }
+	if got, ok := withTestScenario(context.Background(), r, true).Value(testScenarioContextKey).(string); !ok || got != "exp1-prompt-template" { t.Fatalf("safe scenario missing: %q", got) }
+	r.Header.Set("X-CampusClaw-Test-Scenario", "secret token value")
+	if _, ok := withTestScenario(context.Background(), r, true).Value(testScenarioContextKey).(string); ok { t.Fatal("unsafe scenario accepted") }
+}
 
 func uploadFile(t *testing.T, name string, content []byte, limit int64) ([]byte, int, string) {
 	t.Helper()

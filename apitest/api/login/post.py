@@ -8,8 +8,8 @@ def run(ctx):
         ("student_b1", "StudentB123!", "student", 2, "token_b_student"),
     ]:
         status, body = ctx.json("POST", "/api/login", payload={"username": username, "password": password})
-        check_status(status, 200, body)
-        assert body["user"]["role"] == role and body["user"]["class_id"] == class_id, body
+        check_status(status, 200)
+        assert body["user"]["role"] == role and body["user"]["class_id"] == class_id, "login identity did not match the seeded account"
         assert body.get("token"), "login response omitted token"
         setattr(ctx, attr, body["token"])
         ctx.issued_tokens.append(body["token"])

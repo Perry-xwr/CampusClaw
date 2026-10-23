@@ -8,6 +8,7 @@ def run(ctx):
     assert skill, "guided-solution skill is missing"
     assert "不要直接给出最终答案" in skill["instructions"], "guided-solution does not prohibit final answers"
     ctx.skill_id = int(skill["id"])
+    ctx.default_skill_id = ctx.skill_id
     ctx.values["guided_instructions"] = skill["instructions"]
     status, student = ctx.json("GET", "/api/skills", ctx.token_a_student)
     check_status(status, 200, student)

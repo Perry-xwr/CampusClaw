@@ -14,6 +14,7 @@ tags:
   - name: Prompts and skills
   - name: Sessions
   - name: Materials
+  - name: MCP tools
 paths:
   /health:
     get:
@@ -132,6 +133,22 @@ paths:
               schema: { $ref: '#/components/schemas/Material' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Materials]
+      summary: Delete a material from the current class (teacher only)
+      description: Marks the material as pending before removing its Qdrant points, uploaded file, and database records. Retry the same request after a 503; pending records remain visible to teachers only. Historical chat messages and citation snapshots are retained.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Material, source entry, chunks, file, and matching vector points deleted }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503':
+          description: Deletion is pending because an external cleanup step failed; retry this request
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: 'material deletion is pending; retry the request' }
   /api/materials/{id}/file:
     parameters: [{ $ref: '#/components/parameters/ID' }]
     get:
@@ -169,6 +186,7 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
         '503': { $ref: '#/components/responses/DependencyUnavailable' }
   /api/knowledge/search:
     post:
@@ -276,6 +294,7 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
         '409': { $ref: '#/components/responses/Conflict' }
   /api/skills:
     get:
@@ -340,6 +359,7 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
         '409': { $ref: '#/components/responses/Conflict' }
   /api/sessions:
     get:
@@ -401,8 +421,9 @@ paths:
       tags: [Sessions]
       summary: Send a user message and stream evidence-grounded answer events
       description: >-
-        Returns SSE. Successful streams emit sources, one or more delta events,
-        then done. With no evidence, emits sources with an empty citations array,
+        Returns SSE. Streams emit meta, then sources, one or more delta events,
+        then done. With no evidence, emits meta with an empty tool_calls array,
+        sources with an empty citations array,
         a delta containing the fixed no-results answer, and done without Chat Model
         invocation. A model/storage failure after stream starts emits error and no
         completed assistant message is stored.
@@ -420,6 +441,9 @@ paths:
             text/event-stream:
               schema: { type: string, description: 'SSE frames: event: <name> followed by data: <JSON> and a blank line' }
               example: |-
+                event: meta
+                data: {"tool_calls":[{"ref":"unit_convert@mcp-demo","status":"ok"}]}
+
                 event: sources
                 data: {"citations":[{"material_id":1,"material_title":"实验安全","knowledge_entry_id":1,"chunk_id":3,"chunk_index":0,"start_offset":0,"end_offset":120,"excerpt":"实验前应完成安全培训。","material_url":"/api/materials/1/file","rank":1,"score":0.02}]}
 
@@ -434,16 +458,204 @@ paths:
         '500': { $ref: '#/components/responses/InternalError' }
         '503': { $ref: '#/components/responses/DependencyUnavailable' }
       x-sse-events:
+        meta: { $ref: '#/components/schemas/ToolMetaEvent' }
         sources: { $ref: '#/components/schemas/SourcesEvent' }
         delta: { $ref: '#/components/schemas/DeltaEvent' }
         done: { $ref: '#/components/schemas/DoneEvent' }
         error: { $ref: '#/components/schemas/StreamErrorEvent' }
+  /api/mcp/servers:
+    get:
+      tags: [MCP tools]
+      summary: List MCP servers registered for the current class (teacher only)
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Server configuration; token is represented only by has_token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  servers: { type: array, items: { $ref: '#/components/schemas/MCPServer' } }
+              example: { servers: [{ id: 1, name: mcp-demo, base_url: 'http://mcp-demo:8090', connected: false, has_token: true, created_at: '2026-01-01T00:00:00Z' }] }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    post:
+      tags: [MCP tools]
+      summary: Register an allowlisted MCP server for the current class (teacher only)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MCPServerRequest' }
+            example: { name: mcp-demo, base_url: 'http://mcp-demo:8090' }
+      responses:
+        '201':
+          description: Registered server; no credential is accepted or returned
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MCPServer' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/mcp/servers/{id}:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    put:
+      tags: [MCP tools]
+      summary: Rename a disconnected MCP server (teacher only)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MCPServerRequest' }
+            example: { name: mcp-demo, base_url: 'http://mcp-demo:8090' }
+      responses:
+        '200':
+          description: Updated server
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MCPServer' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+    delete:
+      tags: [MCP tools]
+      summary: Delete a disconnected server with no skill bindings (teacher only)
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Server deleted; no response body }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/mcp/servers/{id}/connect:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    post:
+      tags: [MCP tools]
+      summary: Initialize MCP and discover/cache tools (teacher only)
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Successful connection and tool discovery
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MCPConnectResponse' }
+              example: { server_id: 1, connected: true, tools_discovered: 2, has_token: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/DependencyUnavailable' }
+  /api/mcp/servers/{id}/disconnect:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    post:
+      tags: [MCP tools]
+      summary: Disconnect and clear the discovered tool cache (teacher only)
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Server disconnected and cache cleared
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  server_id: { type: integer, format: int64 }
+                  connected: { type: boolean, example: false }
+                  tools_cleared: { type: boolean, example: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /api/mcp/servers/{id}/tools:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    get:
+      tags: [MCP tools]
+      summary: List discovered tools for a connected server (teacher only)
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Current discovered tool schemas
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tools: { type: array, items: { $ref: '#/components/schemas/MCPTool' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /api/mcp/tool-calls:
+    get:
+      tags: [MCP tools]
+      summary: List the latest 100 MCP call audit records in the current class (teacher only)
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Audit metadata without tool arguments, outputs, or credentials
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tool_calls: { type: array, items: { $ref: '#/components/schemas/MCPAudit' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /mcp:
+    servers:
+      - url: http://mcp-demo:8090
+        description: Compose network only; this service has no published host port
+    post:
+      tags: [MCP tools]
+      summary: MCP JSON-RPC 2.0 endpoint (internal service)
+      description: >-
+        Authenticate with the separate server-to-server MCP_AUTH_TOKEN, not a
+        browser session token. Supports initialize, tools/list and tools/call.
+        The same internal service exposes unauthenticated GET /health, which
+        returns 503 until MCP_AUTH_TOKEN is configured. Tool call arguments are
+        validated by the MCP server; errors for valid JSON-RPC requests use the
+        JSON-RPC error object with HTTP 200.
+      security: [{ mcpBearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MCPJSONRPCRequest' }
+            examples:
+              initialize:
+                value: { jsonrpc: '2.0', id: 1, method: initialize, params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: classroom-host, version: '1.0' } } }
+              listTools:
+                value: { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }
+              callTool:
+                value: { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: unit_convert, arguments: { value: 1.5, from_unit: km, to_unit: m } } }
+      responses:
+        '200':
+          description: JSON-RPC result or JSON-RPC error for a valid request
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MCPJSONRPCResponse' }
+              example: { jsonrpc: '2.0', id: 3, result: { content: [{ type: text, text: '1.5 km = 1500 m' }], isError: false } }
+        '400': { description: Invalid JSON or request body, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '401': { description: Missing or incorrect MCP Bearer token, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '503': { description: MCP_AUTH_TOKEN is not configured, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
       bearerFormat: Opaque Token
+    mcpBearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: Server-side MCP service token
   parameters:
     ID:
       name: id
@@ -465,11 +677,17 @@ components:
           schema: { $ref: '#/components/schemas/Error' }
           example: { error: authentication required }
     Forbidden:
-      description: Authenticated user does not have the teacher role
+      description: Authenticated user lacks the required teacher role
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
           example: { error: teacher role required }
+    Conflict:
+      description: Duplicate or state-conflicting resource
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: could not register MCP server }
     InternalError:
       description: Internal server or database error
       content:
@@ -494,12 +712,6 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
           example: { error: resource not found }
-    Conflict:
-      description: Resource could not be saved, including uniqueness conflicts
-      content:
-        application/json:
-          schema: { $ref: '#/components/schemas/Error' }
-          example: { error: could not save resource }
   schemas:
     Error:
       type: object
@@ -541,6 +753,7 @@ components:
         original_filename: { type: string }
         uploader: { type: string }
         created_at: { type: string, format: date-time }
+        deletion_pending: { type: boolean, description: Teacher-visible retry status when external cleanup is incomplete }
     UploadResult:
       type: object
       required: [id, title, index_status]
@@ -634,12 +847,13 @@ components:
         is_active: { type: boolean, default: true }
     Skill:
       type: object
-      required: [id, slug, name, instructions, is_active, updated_at]
+      required: [id, slug, name, instructions, tools, is_active, updated_at]
       properties:
         id: { type: integer, format: int64 }
         slug: { type: string }
         name: { type: string }
         instructions: { type: string }
+        tools: { type: array, items: { $ref: '#/components/schemas/MCPToolBinding' } }
         is_active: { type: boolean }
         updated_at: { type: string, format: date-time }
     SkillRequest:
@@ -649,6 +863,7 @@ components:
         slug: { type: string, minLength: 1, maxLength: 80 }
         name: { type: string, minLength: 1, maxLength: 120 }
         instructions: { type: string, minLength: 1, maxLength: 20000 }
+        tools: { type: array, maxItems: 10, items: { $ref: '#/components/schemas/MCPToolBinding' } }
         is_active: { type: boolean, default: true }
     CreateSessionRequest:
       type: object
@@ -681,6 +896,7 @@ components:
         role: { type: string, enum: [user, assistant] }
         content: { type: string }
         citations: { type: array, items: { $ref: '#/components/schemas/SearchHit' } }
+        tool_calls: { type: array, items: { $ref: '#/components/schemas/ToolCallStatus' } }
         created_at: { type: string, format: date-time }
     SourcesEvent:
       type: object
@@ -703,3 +919,84 @@ components:
       required: [error]
       properties:
         error: { type: string }
+    MCPServerRequest:
+      type: object
+      required: [name, base_url]
+      properties:
+        name: { type: string, pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,39}$' }
+        base_url: { type: string, enum: ['http://mcp-demo:8090'] }
+    MCPJSONRPCRequest:
+      type: object
+      required: [jsonrpc, id, method]
+      properties:
+        jsonrpc: { type: string, enum: ['2.0'] }
+        id: { oneOf: [{ type: string }, { type: integer }] }
+        method: { type: string, enum: [initialize, 'tools/list', 'tools/call'] }
+        params: { type: object, additionalProperties: true }
+    MCPJSONRPCResponse:
+      type: object
+      required: [jsonrpc, id]
+      properties:
+        jsonrpc: { type: string, enum: ['2.0'] }
+        id: { oneOf: [{ type: string }, { type: integer }] }
+        result: { type: object, additionalProperties: true }
+        error:
+          type: object
+          properties:
+            code: { type: integer }
+            message: { type: string }
+    MCPServer:
+      type: object
+      required: [id, name, base_url, connected, has_token, created_at]
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        base_url: { type: string }
+        connected: { type: boolean }
+        has_token: { type: boolean, description: Never contains token value }
+        created_at: { type: string, format: date-time }
+    MCPConnectResponse:
+      type: object
+      required: [server_id, connected, tools_discovered, has_token]
+      properties:
+        server_id: { type: integer, format: int64 }
+        connected: { type: boolean }
+        tools_discovered: { type: integer }
+        has_token: { type: boolean }
+    MCPTool:
+      type: object
+      required: [name, description, input_schema, discovered_at]
+      properties:
+        name: { type: string }
+        description: { type: string }
+        input_schema: { type: object }
+        discovered_at: { type: string, format: date-time }
+    MCPToolBinding:
+      type: object
+      required: [ref]
+      properties:
+        ref: { type: string, pattern: '^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,119}@[a-zA-Z0-9][a-zA-Z0-9_-]{0,39}$', example: unit_convert@mcp-demo }
+    ToolCallStatus:
+      type: object
+      required: [ref, status]
+      properties:
+        ref: { type: string }
+        status: { type: string, enum: [ok, denied, error] }
+    ToolMetaEvent:
+      type: object
+      required: [tool_calls]
+      properties:
+        tool_calls: { type: array, items: { $ref: '#/components/schemas/ToolCallStatus' } }
+    MCPAudit:
+      type: object
+      required: [id, server_name, tool_name, username, session_id, status, created_at]
+      properties:
+        id: { type: integer, format: int64 }
+        server_name: { type: string }
+        tool_name: { type: string }
+        username: { type: string }
+        session_id: { type: integer, format: int64 }
+        message_id: { type: integer, format: int64 }
+        status: { type: string, enum: [pending, ok, denied, error] }
+        error_code: { type: string }
+        created_at: { type: string, format: date-time }
